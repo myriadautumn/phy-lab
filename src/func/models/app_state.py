@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Optional
 
-from func.models.dataset import Dataset
+from func.models.plot_format import PlotFormat
 from func.ui.controls_panel import PlotSelection
+
+if TYPE_CHECKING:
+    from func.models.dataset import Dataset
 
 
 @dataclass
@@ -13,5 +16,7 @@ class AppState:
 
     Keep UI components loosely coupled by storing shared state here.
     """
-    current_dataset: Optional[Dataset] = None
+
+    current_dataset: Optional["Dataset"] = None
     selection: Optional[PlotSelection] = None
+    format: PlotFormat = field(default_factory=PlotFormat)

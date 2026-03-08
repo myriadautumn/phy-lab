@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pyqtgraph as pg
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
+    QDockWidget,
     QFileDialog,
     QMainWindow,
     QMessageBox,
@@ -18,8 +20,9 @@ from func.io.csv_importer import load_csv
 from func.models.app_state import AppState
 from func.models.dataset import Dataset
 from func.models.table_model import PandasTableModel
-from func.plotting.plot_service import export_plot_png, plot_xy
+from func.plotting.plot_service import export_plot_png, render_plot
 from func.ui.controls_panel import ControlsPanel, PlotSelection
+from func.ui.format_panel import FormatPanel
 
 
 class MainWindow(QMainWindow):
@@ -57,6 +60,18 @@ class MainWindow(QMainWindow):
         self.controls = ControlsPanel()
         self.controls.selection_changed.connect(self._on_selection_changed)  # type: ignore[attr-defined]
 
+        # Format panel dock (hidden by default)
+        self.format_panel = FormatPanel()
+        self.format_panel.set_format(self.state.format)
+        self.format_panel.format_changed.connect(self._on_format_changed)  # type: ignore[attr-defined]
+
+        self.format_dock = QDockWidget("Format", self)
+        self.format_dock.setObjectName("format_dock")
+        self.format_dock.setWidget(self.format_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.format_dock)
+        self.format_dock.hide()
+        self.format_dock.visibilityChanged.connect(self._on_format_dock_visibility_changed)  # type: ignore[attr-defined]
+
         # Container layout: controls on top, splitter below
         container = QWidget()
         container_layout = QVBoxLayout(container)
@@ -86,22 +101,51 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)  # type: ignore[attr-defined]
         file_menu.addAction(quit_action)
 
-    def _on_selection_changed(self, sel: PlotSelection) -> None:
-        # Persist selection even if a dataset isn't loaded yet.
-        self.state.selection = sel
+        view_menu = menu.addMenu("View")
 
+        self.toggle_format_action = QAction("Format Panel", self)
+        self.toggle_format_action.setCheckable(True)
+        self.toggle_format_action.setChecked(False)
+        self.toggle_format_action.triggered.connect(self._toggle_format_dock)  # type: ignore[attr-defined]
+        view_menu.addAction(self.toggle_format_action)
+
+    def _toggle_format_dock(self, checked: bool) -> None:
+        if checked:
+            self.format_dock.show()
+        else:
+            self.format_dock.hide()
+
+    def _on_format_dock_visibility_changed(self, visible: bool) -> None:
+        # Keep the View menu toggle in sync.
+        if hasattr(self, "toggle_format_action"):
+            self.toggle_format_action.blockSignals(True)
+            try:
+                self.toggle_format_action.setChecked(bool(visible))
+            finally:
+                self.toggle_format_action.blockSignals(False)
+
+    def _replot_if_possible(self) -> None:
         ds = self.state.current_dataset
-        if ds is None:
+        sel = self.state.selection
+        if ds is None or sel is None:
             return
         if not sel.x_col or not sel.y_col:
             return
 
-        result = plot_xy(self.plot, ds.df, sel.x_col, sel.y_col, sel.mode, clear=True)
+        result = render_plot(self.plot, ds.df, sel, self.state.format, clear=True)
         if not result.ok:
             QMessageBox.warning(self, "Plot failed", result.message)
             return
 
-        self.statusBar().showMessage(f"Loaded {ds.name} | plotted {sel.x_col} vs {sel.y_col}")
+        self.statusBar().showMessage(result.message)
+
+    def _on_format_changed(self, fmt) -> None:
+        self.state.format = fmt
+        self._replot_if_possible()
+
+    def _on_selection_changed(self, sel: PlotSelection) -> None:
+        self.state.selection = sel
+        self._replot_if_possible()
 
     def export_plot(self) -> None:
         # Require something to export.
@@ -181,14 +225,6 @@ class MainWindow(QMainWindow):
         numeric_cols = [str(c) for c in df.select_dtypes(include='number').columns]
         sel = self.controls.set_columns(all_cols, numeric_cols)
 
-        # Persist selection and plot using the returned selection
+        # Persist selection and plot using current formatting
         self.state.selection = sel
-        ds = self.state.current_dataset
-        if ds is not None and sel.x_col and sel.y_col:
-            result = plot_xy(self.plot, ds.df, sel.x_col, sel.y_col, sel.mode, clear=True)
-            if not result.ok:
-                QMessageBox.warning(self, "Plot failed", result.message)
-            else:
-                self.statusBar().showMessage(
-                    f"Loaded {ds.name} | plotted {sel.x_col} vs {sel.y_col}"
-                )
+        self._replot_if_possible()

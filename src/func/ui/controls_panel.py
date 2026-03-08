@@ -1,33 +1,23 @@
-
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import (
-    QButtonGroup,
-    QComboBox,
-    QHBoxLayout,
-    QLabel,
-    QRadioButton,
-    QWidget,
-)
+from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QWidget
 
 
 @dataclass(frozen=True)
 class PlotSelection:
     x_col: str
     y_col: str
-    mode: str  # "line" or "scatter"
 
 
 class ControlsPanel(QWidget):
-    """Top controls row: X/Y selection + plot mode.
+    """Top controls row: X/Y selection.
 
     - Dropdowns are disabled until columns are set.
-    - Emits `selection_changed` whenever X, Y, or mode changes.
+    - Emits `selection_changed` whenever X or Y changes.
     """
 
     selection_changed = pyqtSignal(object)  # emits PlotSelection
@@ -47,36 +37,12 @@ class ControlsPanel(QWidget):
         layout.addWidget(self.x_combo, 1)
         layout.addWidget(QLabel("Y:"))
         layout.addWidget(self.y_combo, 1)
-
-        self.mode_group = QButtonGroup(self)
-        self.line_radio = QRadioButton("Line")
-        self.scatter_radio = QRadioButton("Scatter")
-        self.line_radio.setChecked(True)
-        self.mode_group.addButton(self.line_radio)
-        self.mode_group.addButton(self.scatter_radio)
-
-        layout.addWidget(self.line_radio)
-        layout.addWidget(self.scatter_radio)
         layout.addStretch(1)
 
-        # Wire events
         self.x_combo.currentIndexChanged.connect(self._emit_selection)  # type: ignore[attr-defined]
         self.y_combo.currentIndexChanged.connect(self._emit_selection)  # type: ignore[attr-defined]
-        self.line_radio.toggled.connect(self._emit_selection)  # type: ignore[attr-defined]
 
-    def set_columns(
-        self,
-        all_cols: Sequence[str],
-        numeric_cols: Sequence[str],
-    ) -> PlotSelection:
-        """Populate dropdowns and pick defaults.
-
-        Defaults:
-        - Prefer first two numeric columns if available.
-        - Otherwise, use the first two columns.
-
-        Returns the resulting selection.
-        """
+    def set_columns(self, all_cols: Sequence[str], numeric_cols: Sequence[str]) -> PlotSelection:
         cols = [str(c) for c in all_cols]
         nums = [str(c) for c in numeric_cols]
 
@@ -107,22 +73,21 @@ class ControlsPanel(QWidget):
         self.x_combo.setEnabled(True)
         self.y_combo.setEnabled(True)
 
-        selection = self.get_selection()
-        self.selection_changed.emit(selection)
-        return selection
+        sel = self.get_selection()
+        self.selection_changed.emit(sel)
+        return sel
 
     def get_selection(self) -> PlotSelection:
-        x = self.x_combo.currentText().strip()
-        y = self.y_combo.currentText().strip()
-        mode = "scatter" if self.scatter_radio.isChecked() else "line"
-        return PlotSelection(x_col=x, y_col=y, mode=mode)
+        return PlotSelection(
+            x_col=self.x_combo.currentText().strip(),
+            y_col=self.y_combo.currentText().strip(),
+        )
 
     def set_enabled(self, enabled: bool) -> None:
         self.x_combo.setEnabled(enabled)
         self.y_combo.setEnabled(enabled)
 
     def _emit_selection(self) -> None:
-        # Guard against emitting empty selections during init.
         sel = self.get_selection()
         if not sel.x_col or not sel.y_col:
             return
