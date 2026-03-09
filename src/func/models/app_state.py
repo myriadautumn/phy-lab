@@ -18,5 +18,8 @@ class AppState:
     """
 
     current_dataset: Optional["Dataset"] = None
+    # Persistence / navigation
+    last_file_path: Optional[str] = None
+    recent_files: list[str] = field(default_factory=list)
     selection: Optional[PlotSelection] = None
     format: PlotFormat = field(default_factory=PlotFormat)

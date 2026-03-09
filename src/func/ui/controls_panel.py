@@ -77,6 +77,27 @@ class ControlsPanel(QWidget):
         self.selection_changed.emit(sel)
         return sel
 
+    def set_selection(self, x_col: str, y_col: str) -> PlotSelection:
+        """Programmatically set X/Y selection without emitting intermediate signals.
+
+        Returns the resulting PlotSelection and emits a single `selection_changed`.
+        """
+        self.x_combo.blockSignals(True)
+        self.y_combo.blockSignals(True)
+        try:
+            if x_col:
+                self.x_combo.setCurrentText(str(x_col))
+            if y_col:
+                self.y_combo.setCurrentText(str(y_col))
+        finally:
+            self.x_combo.blockSignals(False)
+            self.y_combo.blockSignals(False)
+
+        sel = self.get_selection()
+        if sel.x_col and sel.y_col:
+            self.selection_changed.emit(sel)
+        return sel
+
     def get_selection(self) -> PlotSelection:
         return PlotSelection(
             x_col=self.x_combo.currentText().strip(),
