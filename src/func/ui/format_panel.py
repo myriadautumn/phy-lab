@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 from typing import Optional
@@ -16,6 +14,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QRadioButton,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -28,6 +27,8 @@ class FormatPanel(QWidget):
     """Format controls (plot formatting; excludes export formatting)."""
 
     format_changed = pyqtSignal(object)  # emits PlotFormat
+    overlay_toggled = pyqtSignal(bool)
+    add_curve_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -72,6 +73,15 @@ class FormatPanel(QWidget):
         self.marker_size_spin.setRange(1, 30)
         self.marker_size_spin.setValue(5)
         style_layout.addRow("Marker size", self.marker_size_spin)
+
+        # Multi-curve controls (state lives in AppState; panel emits events)
+        self.overlay_chk = QCheckBox("Overlay (keep existing curves)")
+        self.overlay_chk.setChecked(True)
+        style_layout.addRow("", self.overlay_chk)
+
+        self.add_curve_btn = QPushButton("Add Curve")
+        self.add_curve_btn.setToolTip("Add the current X/Y as a new curve (used when Overlay is enabled).")
+        style_layout.addRow("", self.add_curve_btn)
 
         root.addWidget(style_box)
 
@@ -174,6 +184,13 @@ class FormatPanel(QWidget):
             self.y_max_edit,
         ]:
             self._connect_change(w)
+
+        # Multi-curve events
+        self.overlay_chk.toggled.connect(self.overlay_toggled.emit)  # type: ignore[attr-defined]
+        self.add_curve_btn.clicked.connect(self.add_curve_requested.emit)  # type: ignore[attr-defined]
+
+        # Ensure mode selection affects the curve added
+        self.mode_group.buttonToggled.connect(lambda b, checked: self._update_mode())
 
         # Keep min/max disabled when Auto is checked
         self.x_auto_chk.toggled.connect(self._sync_limits_enabled)  # type: ignore[attr-defined]
@@ -317,4 +334,11 @@ class FormatPanel(QWidget):
         if self._updating:
             return
         self._sync_limits_enabled()
+        self.format_changed.emit(self.get_format())
+    def set_overlay_state(self, enabled: bool) -> None:
+        """Set the overlay checkbox state to match AppState."""
+        self.overlay_chk.setChecked(enabled)
+
+    def _update_mode(self) -> None:
+        # Emit format_changed immediately to propagate mode selection
         self.format_changed.emit(self.get_format())

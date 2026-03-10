@@ -8,7 +8,7 @@ from func.ui.controls_panel import PlotSelection
 
 if TYPE_CHECKING:
     from func.models.dataset import Dataset
-
+    from func.models.curve import CurveSpec
 
 @dataclass
 class AppState:
@@ -17,9 +17,14 @@ class AppState:
     Keep UI components loosely coupled by storing shared state here.
     """
 
-    current_dataset: Optional["Dataset"] = None
+    current_dataset: Optional[Dataset] = None
+
     # Persistence / navigation
     last_file_path: Optional[str] = None
     recent_files: list[str] = field(default_factory=list)
     selection: Optional[PlotSelection] = None
     format: PlotFormat = field(default_factory=PlotFormat)
+
+    # Multi-curve plotting
+    overlay_enabled: bool = True  # enable overlay by default
+    curves: list[CurveSpec] = field(default_factory=list)

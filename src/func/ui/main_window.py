@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QDockWidget,
@@ -21,9 +22,10 @@ from func.io.csv_importer import load_csv
 from func.models.app_state import AppState
 from func.models.dataset import Dataset
 from func.models.table_model import PandasTableModel
-from func.plotting.plot_service import export_plot_png, render_plot
+from func.plotting.plot_service import export_plot_png, render_plot, render_curves
 from func.ui.controls_panel import ControlsPanel, PlotSelection
 from func.ui.format_panel import FormatPanel
+from func.ui.curves_panel import CurvesPanel
 
 
 class MainWindow(QMainWindow):
@@ -34,9 +36,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("phy-lab")
         self.statusBar().showMessage("Ready")
 
+        self._df_cache: dict[str, object] = {}
+
         # Plot
         self.plot = pg.PlotWidget()
         self.plot.setBackground(None)
+        self.plot.clear()  # Ensure plot starts empty
         self.plot.setLabel("bottom", "x")
         self.plot.setLabel("left", "y")
         self.plot.showGrid(x=True, y=True, alpha=0.3)
@@ -65,6 +70,8 @@ class MainWindow(QMainWindow):
         self.format_panel = FormatPanel()
         self.format_panel.set_format(self.state.format)
         self.format_panel.format_changed.connect(self._on_format_changed)  # type: ignore[attr-defined]
+        self.format_panel.overlay_toggled.connect(self._on_overlay_toggled)  # type: ignore[attr-defined]
+        self.format_panel.add_curve_requested.connect(self._on_add_curve_requested)  # type: ignore[attr-defined]
 
         self.format_dock = QDockWidget("Format", self)
         self.format_dock.setObjectName("format_dock")
@@ -72,6 +79,21 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.format_dock)
         self.format_dock.hide()
         self.format_dock.visibilityChanged.connect(self._on_format_dock_visibility_changed)  # type: ignore[attr-defined]
+
+        # Curves panel dock (hidden by default)
+        self.curves_panel = CurvesPanel()
+        self.curves_panel.set_curves(getattr(self.state, "curves", []))
+        self.curves_panel.visibility_changed.connect(self._on_curve_visibility_changed)
+        self.curves_panel.label_changed.connect(self._on_curve_label_changed)
+        self.curves_panel.remove_requested.connect(self._on_curve_remove_requested)
+        self.curves_panel.clear_all_requested.connect(self._on_curve_clear_all)
+
+        self.curves_dock = QDockWidget("Curves", self)
+        self.curves_dock.setObjectName("curves_dock")
+        self.curves_dock.setWidget(self.curves_panel)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.curves_dock)
+        self.curves_dock.hide()
+        self.curves_dock.visibilityChanged.connect(self._on_curves_dock_visibility_changed)
 
         # Container layout: controls on top, splitter below
         container = QWidget()
@@ -84,6 +106,8 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._refresh_recent_menu()
+        # Auto-restore last session (best-effort)
+        QTimer.singleShot(0, self._restore_last_session)  # type: ignore[arg-type]
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -119,6 +143,12 @@ class MainWindow(QMainWindow):
         self.toggle_format_action.setChecked(False)
         self.toggle_format_action.triggered.connect(self._toggle_format_dock)  # type: ignore[attr-defined]
         view_menu.addAction(self.toggle_format_action)
+
+        self.toggle_curves_action = QAction("Curves Panel", self)
+        self.toggle_curves_action.setCheckable(True)
+        self.toggle_curves_action.setChecked(False)
+        self.toggle_curves_action.triggered.connect(self._toggle_curves_dock)
+        view_menu.addAction(self.toggle_curves_action)
 
     def _get_recent_files(self) -> list[str]:
         rf = getattr(self.state, "recent_files", None)
@@ -217,6 +247,19 @@ class MainWindow(QMainWindow):
             # Never break app flow due to persistence.
             return
 
+    def _restore_last_session(self) -> None:
+        """Best-effort: open the last file from settings if it still exists."""
+        last = getattr(self.state, "last_file_path", None)
+        if not last:
+            return
+
+        path = Path(str(last))
+        if not path.exists():
+            return
+
+        # Load the dataset; _load_csv_path will also refresh menus and plot.
+        self._load_csv_path(path)
+
     def _toggle_format_dock(self, checked: bool) -> None:
         if checked:
             self.format_dock.show()
@@ -232,7 +275,35 @@ class MainWindow(QMainWindow):
             finally:
                 self.toggle_format_action.blockSignals(False)
 
+    def _df_provider(self, file_path: str):
+        # Return the DataFrame for a given file path, using cache if possible.
+        # Each curve's file_path is unique per file, so cache is keyed by file_path.
+        if file_path in self._df_cache:
+            return self._df_cache[file_path]
+        path = Path(file_path)
+        if not path.exists():
+            return None
+        try:
+            df = load_csv(path)
+        except Exception:
+            return None
+        # Cache the DataFrame for this file path, but do NOT overwrite previous entries.
+        self._df_cache[file_path] = df
+        return df
+
     def _replot_if_possible(self) -> None:
+        curves = getattr(self.state, "curves", []) or []
+        if curves:
+            result = render_curves(
+                self.plot,
+                self._df_provider,
+                curves,
+                self.state.format,
+                clear=not getattr(self.state, "overlay_enabled", True)
+            )
+            self.statusBar().showMessage(result.message)
+            return
+
         ds = self.state.current_dataset
         sel = self.state.selection
         if ds is None or sel is None:
@@ -251,6 +322,95 @@ class MainWindow(QMainWindow):
         self.state.format = fmt
         self._replot_if_possible()
         self._save_settings_best_effort()
+
+    def _on_overlay_toggled(self, enabled: bool) -> None:
+        # Overlay state lives in AppState (not PlotFormat)
+        self.state.overlay_enabled = bool(enabled)
+        self._save_settings_best_effort()
+        self.statusBar().showMessage(
+            "Overlay enabled" if self.state.overlay_enabled else "Overlay disabled"
+        )
+
+    def _on_add_curve_requested(self) -> None:
+        # Add the current selection as a curve (for multi-curve workflow)
+        ds = self.state.current_dataset
+        sel = self.state.selection
+        if ds is None or sel is None or not sel.x_col or not sel.y_col:
+            QMessageBox.information(
+                self,
+                "Nothing to add",
+                "Import data and select X/Y before adding a curve.",
+            )
+            return
+
+        # Maintain overlay logic
+        if not hasattr(self.state, "overlay_enabled"):
+            self.state.overlay_enabled = True
+        if not hasattr(self.state, "curves") or self.state.curves is None:
+            self.state.curves = []
+        if not getattr(self.state, "overlay_enabled", True):
+            self.state.curves = []  # Only clear if overlay disabled
+        curve = {
+            "id": str(uuid4()),
+            "dataset": ds.name,
+            "path": str(ds.path),
+            "x_col": sel.x_col,
+            "y_col": sel.y_col,
+            "mode": getattr(self.state.format, "mode", "line"),
+            "label": f"{sel.y_col} vs {sel.x_col}",
+            "visible": True
+        }
+        self.state.curves.append(curve)
+        self.curves_panel.set_curves(self.state.curves)
+        self._replot_if_possible()
+        self._save_settings_best_effort()
+        self.statusBar().showMessage(
+            f"Added curve: {curve['label']} (total {len(self.state.curves)})"
+        )
+
+    def _on_curve_visibility_changed(self, curve_id: str, visible: bool) -> None:
+        for c in getattr(self.state, "curves", []):
+            if isinstance(c, dict) and c.get("id") == curve_id:
+                c["visible"] = bool(visible)
+                break
+        self._save_settings_best_effort()
+        self._replot_if_possible()
+
+    def _on_curve_label_changed(self, curve_id: str, label: str) -> None:
+        for c in getattr(self.state, "curves", []):
+            if isinstance(c, dict) and c.get("id") == curve_id:
+                c["label"] = str(label)
+                break
+        self._save_settings_best_effort()
+        self._replot_if_possible()
+
+    def _on_curve_remove_requested(self, curve_id: str) -> None:
+        curves = [c for c in getattr(self.state, "curves", []) if not (isinstance(c, dict) and c.get("id") == curve_id)]
+        self.state.curves = curves
+        self.curves_panel.set_curves(curves)
+        self._save_settings_best_effort()
+        self._replot_if_possible()
+
+    def _on_curve_clear_all(self) -> None:
+        self.state.curves = []
+        self.curves_panel.set_curves([])
+        self._save_settings_best_effort()
+        self._replot_if_possible()
+
+    def _toggle_curves_dock(self, checked: bool) -> None:
+        if checked:
+            self.curves_dock.show()
+        else:
+            self.curves_dock.hide()
+
+    def _on_curves_dock_visibility_changed(self, visible: bool) -> None:
+        # Keep the View menu toggle in sync.
+        if hasattr(self, "toggle_curves_action"):
+            self.toggle_curves_action.blockSignals(True)
+            try:
+                self.toggle_curves_action.setChecked(bool(visible))
+            finally:
+                self.toggle_curves_action.blockSignals(False)
 
     def _on_selection_changed(self, sel: PlotSelection) -> None:
         self.state.selection = sel
@@ -301,17 +461,14 @@ class MainWindow(QMainWindow):
         # If settings preloaded a selection, try to keep it (only if columns exist)
         pre_sel = getattr(self.state, "selection", None)
         if pre_sel is not None and getattr(pre_sel, "x_col", None) in df.columns and getattr(pre_sel, "y_col", None) in df.columns:
-            # Try to set selection without relying on a ControlsPanel method.
             try:
-                self.controls.x_combo.setCurrentText(str(pre_sel.x_col))
-                self.controls.y_combo.setCurrentText(str(pre_sel.y_col))
-                sel = self.controls.get_selection()
+                sel = self.controls.set_selection(str(pre_sel.x_col), str(pre_sel.y_col))
             except Exception:
                 pass
 
         # Persist selection and plot using current formatting
         self.state.selection = sel
-        self._replot_if_possible()
+        self._replot_if_possible()  # Display imported CSV immediately
 
         # Save settings snapshot
         self._save_settings_best_effort()

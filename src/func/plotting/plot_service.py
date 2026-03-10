@@ -24,7 +24,7 @@ def plot_xy(
     y_col: str,
     mode: str = "line",
     *,
-    clear: bool = True,
+    clear: bool = False,
     sort_by_x: bool = True,
     line_width: int | None = None,
     marker_size: int = 5,
@@ -63,47 +63,32 @@ def plot_xy(
         y = y[order]
 
     if clear:
-        try:
-            plot_widget.clear()
-        except Exception:
-            pass
+        plot_widget.clear()
 
     if set_labels:
         # Default axis labels (render_plot may override)
-        try:
-            plot_widget.setLabel("bottom", str(x_col))
-            plot_widget.setLabel("left", str(y_col))
-        except Exception:
-            pass
+        plot_widget.setLabel("bottom", str(x_col))
+        plot_widget.setLabel("left", str(y_col))
 
-    try:
-        if mode == "scatter":
-            if curve_name:
-                plot_widget.plot(x, y, pen=None, symbol="o", symbolSize=int(marker_size), name=curve_name)
-            else:
-                plot_widget.plot(x, y, pen=None, symbol="o", symbolSize=int(marker_size))
+    mode = str(mode) if mode else "line"
+    if mode == "scatter":
+        if curve_name:
+            plot_widget.plot(x, y, pen=None, symbol="o", symbolSize=int(marker_size), name=curve_name)
         else:
-            if line_width is None:
-                if curve_name:
-                    plot_widget.plot(x, y, name=curve_name)
-                else:
-                    plot_widget.plot(x, y)
+            plot_widget.plot(x, y, pen=None, symbol="o", symbolSize=int(marker_size))
+    else:
+        if line_width is None:
+            if curve_name:
+                plot_widget.plot(x, y, name=curve_name)
             else:
-                try:
-                    import pyqtgraph as pg
-
-                    pen = pg.mkPen(width=int(line_width))
-                    if curve_name:
-                        plot_widget.plot(x, y, pen=pen, name=curve_name)
-                    else:
-                        plot_widget.plot(x, y, pen=pen)
-                except Exception:
-                    if curve_name:
-                        plot_widget.plot(x, y, name=curve_name)
-                    else:
-                        plot_widget.plot(x, y)
-    except Exception as e:
-        return PlotResult(False, f"Plot failed: {e}")
+                plot_widget.plot(x, y)
+        else:
+            import pyqtgraph as pg
+            pen = pg.mkPen(width=int(line_width))
+            if curve_name:
+                plot_widget.plot(x, y, pen=pen, name=curve_name)
+            else:
+                plot_widget.plot(x, y, pen=pen)
 
     return PlotResult(True, f"Plotted {x_col} vs {y_col} ({mode}).")
 
@@ -232,6 +217,197 @@ def render_plot(
 
     return PlotResult(True, f"Rendered {y_col} vs {x_col}")
 
+
+def render_curves(
+    plot_widget,
+    df_provider,
+    curves,
+    fmt: "PlotFormat",
+    *,
+    clear: bool = True,
+) -> PlotResult:
+    """Render multiple curves on the same plot.
+
+    Parameters
+    ----------
+    plot_widget:
+        pyqtgraph PlotWidget (duck-typed).
+    df_provider:
+        Callable that takes a curve path (str) and returns a pandas DataFrame.
+        Signature: df_provider(path: str) -> DataFrame | None
+    curves:
+        Iterable of curve specs (duck-typed). Expected keys/attrs:
+        - path (str)
+        - x_col (str)
+        - y_col (str)
+        - mode ("line"|"scatter")
+        - label (str)
+        - visible (bool)
+    fmt:
+        Global PlotFormat applied once (grid/title/legend/scales/limits/style).
+    clear:
+        Clear the plot before drawing.
+
+    Returns
+    -------
+    PlotResult
+    """
+
+    if curves is None or len(curves) == 0:
+        if clear:
+            try:
+                plot_widget.clear()
+            except Exception:
+                pass
+        return PlotResult(False, "No curves to render.")
+
+    # Collect visible curves
+    visible = []
+    for c in curves:
+        try:
+            v = bool(c.get("visible", True))
+        except Exception:
+            v = bool(getattr(c, "visible", True))
+        if v:
+            visible.append(c)
+
+    if not visible:
+        if clear:
+            try:
+                plot_widget.clear()
+            except Exception:
+                pass
+        return PlotResult(False, "No visible curves to render.")
+
+    # Clear plot only if clear is True
+    if clear:
+        try:
+            plot_widget.clear()
+        except Exception:
+            pass
+
+    # Apply global formatting (grid/scales/legend/title) once before plotting curves
+    try:
+        plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
+    except Exception:
+        pass
+
+    try:
+        plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
+    except Exception:
+        pass
+
+    # Legend
+    try:
+        legend = getattr(plot_widget.plotItem, "legend", None)
+        if bool(fmt.legend):
+            if legend is None:
+                plot_widget.addLegend()
+        else:
+            if legend is not None:
+                plot_widget.plotItem.removeItem(legend)
+                plot_widget.plotItem.legend = None
+    except Exception:
+        pass
+
+    # Title
+    try:
+        if bool(fmt.title_enabled) and (fmt.title or "").strip():
+            plot_widget.setTitle((fmt.title or "").strip())
+        else:
+            plot_widget.setTitle("")
+    except Exception:
+        pass
+
+    # Axis labels and limits will be applied after plotting all curves
+
+    # Draw each curve independently without clearing the plot
+    rendered = 0
+    for c in visible:
+        path = None
+        x_col = None
+        y_col = None
+        mode = None
+        label = None
+
+        try:
+            path = c.get("path")
+            x_col = c.get("x_col")
+            y_col = c.get("y_col")
+            mode = c.get("mode", fmt.mode)
+            label = c.get("label")
+        except Exception:
+            path = getattr(c, "path", None)
+            x_col = getattr(c, "x_col", None)
+            y_col = getattr(c, "y_col", None)
+            mode = getattr(c, "mode", fmt.mode)
+            label = getattr(c, "label", None)
+
+        if not path or not x_col or not y_col:
+            continue
+
+        df = df_provider(str(path))
+        if df is None:
+            continue
+
+        curve_name = str(label) if label else f"{y_col} vs {x_col}"
+        mode_str = str(mode) if mode else fmt.mode
+        res = plot_xy(
+            plot_widget,
+            df,
+            str(x_col),
+            str(y_col),
+            mode_str,
+            clear=False,
+            sort_by_x=bool(fmt.sort_by_x),
+            line_width=fmt.line_width,
+            marker_size=int(fmt.marker_size),
+            curve_name=curve_name if bool(fmt.legend) else None,
+            set_labels=False,
+        )
+        if res.ok:
+            rendered += 1
+
+    if rendered == 0:
+        return PlotResult(False, "No curves could be rendered (missing files/columns).")
+
+    # Apply axis labels after all curves are drawn
+    try:
+        first = visible[0]
+        try:
+            x_col0 = str(first.get("x_col", ""))
+            y_col0 = str(first.get("y_col", ""))
+        except Exception:
+            x_col0 = str(getattr(first, "x_col", ""))
+            y_col0 = str(getattr(first, "y_col", ""))
+
+        xlabel = (fmt.x_label or "").strip() if bool(fmt.x_label_enabled) else (x_col0 or "x")
+        ylabel = (fmt.y_label or "").strip() if bool(fmt.y_label_enabled) else (y_col0 or "y")
+
+        plot_widget.setLabel("bottom", xlabel)
+        plot_widget.setLabel("left", ylabel)
+    except Exception:
+        pass
+
+    # Apply limits after plotting all curves
+    try:
+        if fmt.x_limits.auto:
+            plot_widget.enableAutoRange(axis="x", enable=True)
+        else:
+            plot_widget.enableAutoRange(axis="x", enable=False)
+            if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
+                plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
+
+        if fmt.y_limits.auto:
+            plot_widget.enableAutoRange(axis="y", enable=True)
+        else:
+            plot_widget.enableAutoRange(axis="y", enable=False)
+            if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
+                plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
+    except Exception:
+        pass
+
+    return PlotResult(True, f"Rendered {rendered} curve(s)")
 
 def export_plot_png(plot_widget, out_path: Path) -> PlotResult:
     """Export the current pyqtgraph PlotWidget to a PNG image."""
