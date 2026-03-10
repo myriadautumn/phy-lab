@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pyqtgraph as pg
 
 if TYPE_CHECKING:
     from func.models.plot_format import PlotFormat
@@ -17,6 +18,61 @@ class PlotResult:
     message: str
 
 
+def _normalize_xy_error(df, x_col: str, y_col: str, y_err_col: str | None = None):
+    """Extract numeric x/y and optional symmetric y-error arrays.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray | None]
+        x, y, y_err arrays after numeric coercion and NaN/inf filtering.
+    """
+    if df is None:
+        raise ValueError("No dataset loaded.")
+    if not x_col or not y_col:
+        raise ValueError("X and Y columns must be selected.")
+    if x_col not in df.columns or y_col not in df.columns:
+        raise ValueError("Selected X/Y columns were not found in the dataset.")
+
+    x = np.asarray(df[x_col], dtype=float)
+    y = np.asarray(df[y_col], dtype=float)
+
+    y_err = None
+    if y_err_col:
+        if y_err_col not in df.columns:
+            raise ValueError("Selected Y error column was not found in the dataset.")
+        y_err = np.asarray(df[y_err_col], dtype=float)
+
+    mask = np.isfinite(x) & np.isfinite(y)
+    if y_err is not None:
+        mask = mask & np.isfinite(y_err)
+
+    if mask.ndim != 1:
+        mask = np.ravel(mask)
+
+    x = x[mask]
+    y = y[mask]
+    if y_err is not None:
+        y_err = np.abs(y_err[mask])
+
+    if x.size == 0:
+        raise ValueError("No plottable numeric data after filtering NaN/inf values.")
+
+    return x, y, y_err
+
+
+def _plot_error_bars(plot_widget, x: np.ndarray, y: np.ndarray, y_err: np.ndarray | None) -> None:
+    """Plot symmetric Y error bars on the current plot.
+
+    pyqtgraph ErrorBarItem uses `top` and `bottom` lengths, so we pass the same
+    symmetric error to both.
+    """
+    if y_err is None or len(y_err) == 0:
+        return
+
+    err_item = pg.ErrorBarItem(x=x, y=y, top=y_err, bottom=y_err, beam=0.15)
+    plot_widget.addItem(err_item)
+
+
 def plot_xy(
     plot_widget,
     df,
@@ -24,6 +80,7 @@ def plot_xy(
     y_col: str,
     mode: str = "line",
     *,
+    y_err_col: str | None = None,
     clear: bool = False,
     sort_by_x: bool = True,
     line_width: int | None = None,
@@ -33,34 +90,19 @@ def plot_xy(
 ) -> PlotResult:
     """Plot df[x_col] vs df[y_col] on a pyqtgraph PlotWidget."""
 
-    if df is None:
-        return PlotResult(False, "No dataset loaded.")
-
-    if not x_col or not y_col:
-        return PlotResult(False, "X and Y columns must be selected.")
-
-    if x_col not in df.columns or y_col not in df.columns:
-        return PlotResult(False, "Selected columns were not found in the dataset.")
-
     try:
-        x = np.asarray(df[x_col], dtype=float)
-        y = np.asarray(df[y_col], dtype=float)
+        x, y, y_err = _normalize_xy_error(df, x_col, y_col, y_err_col)
+    except ValueError as e:
+        return PlotResult(False, str(e))
     except Exception:
         return PlotResult(False, "Selected columns could not be converted to numeric values.")
-
-    mask = np.isfinite(x) & np.isfinite(y)
-    if mask.ndim != 1:
-        mask = np.ravel(mask)
-    x = x[mask]
-    y = y[mask]
-
-    if x.size == 0:
-        return PlotResult(False, "No plottable numeric data after filtering NaN/inf values.")
 
     if sort_by_x and mode != "scatter":
         order = np.argsort(x)
         x = x[order]
         y = y[order]
+        if y_err is not None:
+            y_err = y_err[order]
 
     if clear:
         plot_widget.clear()
@@ -83,12 +125,13 @@ def plot_xy(
             else:
                 plot_widget.plot(x, y)
         else:
-            import pyqtgraph as pg
             pen = pg.mkPen(width=int(line_width))
             if curve_name:
                 plot_widget.plot(x, y, pen=pen, name=curve_name)
             else:
                 plot_widget.plot(x, y, pen=pen)
+
+    _plot_error_bars(plot_widget, x, y, y_err)
 
     return PlotResult(True, f"Plotted {x_col} vs {y_col} ({mode}).")
 
@@ -112,44 +155,29 @@ def render_plot(
         return PlotResult(False, "X and Y columns must be selected.")
 
     if clear:
-        try:
-            plot_widget.clear()
-        except Exception:
-            pass
+        plot_widget.clear()
 
     # Grid
-    try:
-        plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
-    except Exception:
-        pass
+    plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
 
     # Scales
-    try:
-        plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
-    except Exception:
-        pass
+    plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
 
     # Legend
-    try:
-        legend = getattr(plot_widget.plotItem, "legend", None)
-        if bool(fmt.legend):
-            if legend is None:
-                plot_widget.addLegend()
-        else:
-            if legend is not None:
-                plot_widget.plotItem.removeItem(legend)
-                plot_widget.plotItem.legend = None
-    except Exception:
-        pass
+    legend = getattr(plot_widget.plotItem, "legend", None)
+    if bool(fmt.legend):
+        if legend is None:
+            plot_widget.addLegend()
+    else:
+        if legend is not None:
+            plot_widget.plotItem.removeItem(legend)
+            plot_widget.plotItem.legend = None
 
     # Title
-    try:
-        if bool(fmt.title_enabled) and (fmt.title or "").strip():
-            plot_widget.setTitle((fmt.title or "").strip())
-        else:
-            plot_widget.setTitle("")
-    except Exception:
-        pass
+    if bool(fmt.title_enabled) and (fmt.title or "").strip():
+        plot_widget.setTitle((fmt.title or "").strip())
+    else:
+        plot_widget.setTitle("")
 
     # Axis labels
     xlabel = x_col
@@ -159,11 +187,8 @@ def render_plot(
     if bool(fmt.y_label_enabled) and (fmt.y_label or "").strip():
         ylabel = (fmt.y_label or "").strip()
 
-    try:
-        plot_widget.setLabel("bottom", xlabel)
-        plot_widget.setLabel("left", ylabel)
-    except Exception:
-        pass
+    plot_widget.setLabel("bottom", xlabel)
+    plot_widget.setLabel("left", ylabel)
 
     curve_name = None
     if bool(fmt.legend):
@@ -175,6 +200,7 @@ def render_plot(
         x_col,
         y_col,
         fmt.mode,
+        y_err_col=(selection.y_err_col or "").strip() or None,
         clear=False,
         sort_by_x=bool(fmt.sort_by_x),
         line_width=fmt.line_width,
@@ -186,34 +212,31 @@ def render_plot(
         return res
 
     # Limits
-    try:
-        if fmt.x_limits.auto:
-            plot_widget.enableAutoRange(axis="x", enable=True)
-        else:
-            plot_widget.enableAutoRange(axis="x", enable=False)
-            if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
-                plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
-            elif fmt.x_limits.vmin is not None:
-                xr = plot_widget.plotItem.vb.viewRange()[0]
-                plot_widget.setXRange(float(fmt.x_limits.vmin), float(xr[1]), padding=0)
-            elif fmt.x_limits.vmax is not None:
-                xr = plot_widget.plotItem.vb.viewRange()[0]
-                plot_widget.setXRange(float(xr[0]), float(fmt.x_limits.vmax), padding=0)
+    if fmt.x_limits.auto:
+        plot_widget.enableAutoRange(axis="x", enable=True)
+    else:
+        plot_widget.enableAutoRange(axis="x", enable=False)
+        if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
+            plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
+        elif fmt.x_limits.vmin is not None:
+            xr = plot_widget.plotItem.vb.viewRange()[0]
+            plot_widget.setXRange(float(fmt.x_limits.vmin), float(xr[1]), padding=0)
+        elif fmt.x_limits.vmax is not None:
+            xr = plot_widget.plotItem.vb.viewRange()[0]
+            plot_widget.setXRange(float(xr[0]), float(fmt.x_limits.vmax), padding=0)
 
-        if fmt.y_limits.auto:
-            plot_widget.enableAutoRange(axis="y", enable=True)
-        else:
-            plot_widget.enableAutoRange(axis="y", enable=False)
-            if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
-                plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
-            elif fmt.y_limits.vmin is not None:
-                yr = plot_widget.plotItem.vb.viewRange()[1]
-                plot_widget.setYRange(float(fmt.y_limits.vmin), float(yr[1]), padding=0)
-            elif fmt.y_limits.vmax is not None:
-                yr = plot_widget.plotItem.vb.viewRange()[1]
-                plot_widget.setYRange(float(yr[0]), float(fmt.y_limits.vmax), padding=0)
-    except Exception:
-        pass
+    if fmt.y_limits.auto:
+        plot_widget.enableAutoRange(axis="y", enable=True)
+    else:
+        plot_widget.enableAutoRange(axis="y", enable=False)
+        if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
+            plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
+        elif fmt.y_limits.vmin is not None:
+            yr = plot_widget.plotItem.vb.viewRange()[1]
+            plot_widget.setYRange(float(fmt.y_limits.vmin), float(yr[1]), padding=0)
+        elif fmt.y_limits.vmax is not None:
+            yr = plot_widget.plotItem.vb.viewRange()[1]
+            plot_widget.setYRange(float(yr[0]), float(fmt.y_limits.vmax), padding=0)
 
     return PlotResult(True, f"Rendered {y_col} vs {x_col}")
 
@@ -255,10 +278,7 @@ def render_curves(
 
     if curves is None or len(curves) == 0:
         if clear:
-            try:
-                plot_widget.clear()
-            except Exception:
-                pass
+            plot_widget.clear()
         return PlotResult(False, "No curves to render.")
 
     # Collect visible curves
@@ -273,53 +293,32 @@ def render_curves(
 
     if not visible:
         if clear:
-            try:
-                plot_widget.clear()
-            except Exception:
-                pass
+            plot_widget.clear()
         return PlotResult(False, "No visible curves to render.")
 
     # Clear plot only if clear is True
     if clear:
-        try:
-            plot_widget.clear()
-        except Exception:
-            pass
+        plot_widget.clear()
 
     # Apply global formatting (grid/scales/legend/title) once before plotting curves
-    try:
-        plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
-    except Exception:
-        pass
-
-    try:
-        plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
-    except Exception:
-        pass
+    plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
+    plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
 
     # Legend
-    try:
-        legend = getattr(plot_widget.plotItem, "legend", None)
-        if bool(fmt.legend):
-            if legend is None:
-                plot_widget.addLegend()
-        else:
-            if legend is not None:
-                plot_widget.plotItem.removeItem(legend)
-                plot_widget.plotItem.legend = None
-    except Exception:
-        pass
+    legend = getattr(plot_widget.plotItem, "legend", None)
+    if bool(fmt.legend):
+        if legend is None:
+            plot_widget.addLegend()
+    else:
+        if legend is not None:
+            plot_widget.plotItem.removeItem(legend)
+            plot_widget.plotItem.legend = None
 
     # Title
-    try:
-        if bool(fmt.title_enabled) and (fmt.title or "").strip():
-            plot_widget.setTitle((fmt.title or "").strip())
-        else:
-            plot_widget.setTitle("")
-    except Exception:
-        pass
-
-    # Axis labels and limits will be applied after plotting all curves
+    if bool(fmt.title_enabled) and (fmt.title or "").strip():
+        plot_widget.setTitle((fmt.title or "").strip())
+    else:
+        plot_widget.setTitle("")
 
     # Draw each curve independently without clearing the plot
     rendered = 0
@@ -327,6 +326,7 @@ def render_curves(
         path = None
         x_col = None
         y_col = None
+        y_err_col = None
         mode = None
         label = None
 
@@ -334,12 +334,14 @@ def render_curves(
             path = c.get("path")
             x_col = c.get("x_col")
             y_col = c.get("y_col")
+            y_err_col = c.get("y_err_col")
             mode = c.get("mode", fmt.mode)
             label = c.get("label")
         except Exception:
             path = getattr(c, "path", None)
             x_col = getattr(c, "x_col", None)
             y_col = getattr(c, "y_col", None)
+            y_err_col = getattr(c, "y_err_col", None)
             mode = getattr(c, "mode", fmt.mode)
             label = getattr(c, "label", None)
 
@@ -358,6 +360,7 @@ def render_curves(
             str(x_col),
             str(y_col),
             mode_str,
+            y_err_col=str(y_err_col).strip() or None if y_err_col is not None else None,
             clear=False,
             sort_by_x=bool(fmt.sort_by_x),
             line_width=fmt.line_width,
@@ -372,40 +375,34 @@ def render_curves(
         return PlotResult(False, "No curves could be rendered (missing files/columns).")
 
     # Apply axis labels after all curves are drawn
+    first = visible[0]
     try:
-        first = visible[0]
-        try:
-            x_col0 = str(first.get("x_col", ""))
-            y_col0 = str(first.get("y_col", ""))
-        except Exception:
-            x_col0 = str(getattr(first, "x_col", ""))
-            y_col0 = str(getattr(first, "y_col", ""))
-
-        xlabel = (fmt.x_label or "").strip() if bool(fmt.x_label_enabled) else (x_col0 or "x")
-        ylabel = (fmt.y_label or "").strip() if bool(fmt.y_label_enabled) else (y_col0 or "y")
-
-        plot_widget.setLabel("bottom", xlabel)
-        plot_widget.setLabel("left", ylabel)
+        x_col0 = str(first.get("x_col", ""))
+        y_col0 = str(first.get("y_col", ""))
     except Exception:
-        pass
+        x_col0 = str(getattr(first, "x_col", ""))
+        y_col0 = str(getattr(first, "y_col", ""))
+
+    xlabel = (fmt.x_label or "").strip() if bool(fmt.x_label_enabled) else (x_col0 or "x")
+    ylabel = (fmt.y_label or "").strip() if bool(fmt.y_label_enabled) else (y_col0 or "y")
+
+    plot_widget.setLabel("bottom", xlabel)
+    plot_widget.setLabel("left", ylabel)
 
     # Apply limits after plotting all curves
-    try:
-        if fmt.x_limits.auto:
-            plot_widget.enableAutoRange(axis="x", enable=True)
-        else:
-            plot_widget.enableAutoRange(axis="x", enable=False)
-            if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
-                plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
+    if fmt.x_limits.auto:
+        plot_widget.enableAutoRange(axis="x", enable=True)
+    else:
+        plot_widget.enableAutoRange(axis="x", enable=False)
+        if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
+            plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
 
-        if fmt.y_limits.auto:
-            plot_widget.enableAutoRange(axis="y", enable=True)
-        else:
-            plot_widget.enableAutoRange(axis="y", enable=False)
-            if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
-                plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
-    except Exception:
-        pass
+    if fmt.y_limits.auto:
+        plot_widget.enableAutoRange(axis="y", enable=True)
+    else:
+        plot_widget.enableAutoRange(axis="y", enable=False)
+        if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
+            plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
 
     return PlotResult(True, f"Rendered {rendered} curve(s)")
 

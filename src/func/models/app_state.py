@@ -19,6 +19,11 @@ class AppState:
 
     current_dataset: Optional[Dataset] = None
 
+    # Analysis / transformation workflow
+    derived_datasets: list[Dataset] = field(default_factory=list)
+    last_analysis_expression: Optional[str] = None
+    error_column_map: dict[str, str] = field(default_factory=dict)
+
     # Persistence / navigation
     last_file_path: Optional[str] = None
     recent_files: list[str] = field(default_factory=list)

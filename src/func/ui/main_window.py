@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 from uuid import uuid4
+
+from PyQt6.QtWidgets import QLabel
 
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer
@@ -18,14 +19,19 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from func.analysis.expression_engine import (
+    ExpressionEngineError,
+    build_derived_dataset,
+)
 from func.io.csv_importer import load_csv
 from func.models.app_state import AppState
 from func.models.dataset import Dataset
 from func.models.table_model import PandasTableModel
-from func.plotting.plot_service import export_plot_png, render_plot, render_curves
+from func.plotting.plot_service import export_plot_png, render_curves, render_plot
+from func.ui.analysis_panel import AnalysisPanel, AnalysisRequest
 from func.ui.controls_panel import ControlsPanel, PlotSelection
-from func.ui.format_panel import FormatPanel
 from func.ui.curves_panel import CurvesPanel
+from func.ui.format_panel import FormatPanel
 
 
 class MainWindow(QMainWindow):
@@ -55,6 +61,10 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(True)
         self.table.hide()  # hidden until import
 
+        # Dataset name label
+        self.table_label = QLabel("", self)
+        self.table_label.setStyleSheet("font-weight: bold; margin: 4px;")
+
         # Splitter: left = table preview, right = plot
         self.splitter = QSplitter()
         self.splitter.addWidget(self.table)
@@ -62,7 +72,7 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 2)
 
-        # Controls panel (X/Y selection + plot type)
+        # Controls panel (X/Y selection + optional Y error)
         self.controls = ControlsPanel()
         self.controls.selection_changed.connect(self._on_selection_changed)  # type: ignore[attr-defined]
 
@@ -95,18 +105,30 @@ class MainWindow(QMainWindow):
         self.curves_dock.hide()
         self.curves_dock.visibilityChanged.connect(self._on_curves_dock_visibility_changed)
 
-        # Container layout: controls on top, splitter below
+        # Analysis panel dock (hidden by default)
+        self.analysis_panel = AnalysisPanel()
+        self.analysis_panel.analysis_requested.connect(self._on_analysis_requested)
+        self.analysis_panel.clear_requested.connect(self._on_analysis_cleared)
+
+        self.analysis_dock = QDockWidget("Analysis", self)
+        self.analysis_dock.setObjectName("analysis_dock")
+        self.analysis_dock.setWidget(self.analysis_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.analysis_dock)
+        self.analysis_dock.hide()
+        self.analysis_dock.visibilityChanged.connect(self._on_analysis_dock_visibility_changed)
+
+        # Container layout: controls on top, dataset label, splitter below
         container = QWidget()
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(6)
         container_layout.addWidget(self.controls)
+        container_layout.addWidget(self.table_label)
         container_layout.addWidget(self.splitter, 1)
         self.setCentralWidget(container)
 
         self._build_menu()
         self._refresh_recent_menu()
-        # Auto-restore last session (best-effort)
         QTimer.singleShot(0, self._restore_last_session)  # type: ignore[arg-type]
 
     def _build_menu(self) -> None:
@@ -117,7 +139,6 @@ class MainWindow(QMainWindow):
         import_action.triggered.connect(self.import_csv)  # type: ignore[attr-defined]
         file_menu.addAction(import_action)
 
-        # Open Recent
         self.open_recent_menu = file_menu.addMenu("Open Recent")
         self.open_recent_menu.setEnabled(False)
 
@@ -150,10 +171,15 @@ class MainWindow(QMainWindow):
         self.toggle_curves_action.triggered.connect(self._toggle_curves_dock)
         view_menu.addAction(self.toggle_curves_action)
 
+        self.toggle_analysis_action = QAction("Analysis Panel", self)
+        self.toggle_analysis_action.setCheckable(True)
+        self.toggle_analysis_action.setChecked(False)
+        self.toggle_analysis_action.triggered.connect(self._toggle_analysis_dock)
+        view_menu.addAction(self.toggle_analysis_action)
+
     def _get_recent_files(self) -> list[str]:
         rf = getattr(self.state, "recent_files", None)
         if isinstance(rf, list):
-            # normalize to strings
             return [str(p) for p in rf if p]
         return []
 
@@ -171,7 +197,6 @@ class MainWindow(QMainWindow):
             setattr(self.state, "last_file_path", p)
 
     def _refresh_recent_menu(self) -> None:
-        # Populate Open Recent submenu from state.recent_files
         if not hasattr(self, "open_recent_menu"):
             return
 
@@ -181,7 +206,6 @@ class MainWindow(QMainWindow):
         files = self._get_recent_files()
         if not files:
             menu.setEnabled(False)
-            # Keep a placeholder item (disabled) for UX
             placeholder = QAction("(No recent files)", self)
             placeholder.setEnabled(False)
             menu.addAction(placeholder)
@@ -194,7 +218,6 @@ class MainWindow(QMainWindow):
 
         menu.setEnabled(True)
 
-        # Add file entries
         for f in files:
             act = QAction(f, self)
             act.triggered.connect(lambda checked=False, fp=f: self._open_recent_file(fp))  # type: ignore[attr-defined]
@@ -220,7 +243,6 @@ class MainWindow(QMainWindow):
                 "File not found",
                 f"This file no longer exists:\n\n{file_path}",
             )
-            # Remove it from recents
             files = [f for f in self._get_recent_files() if f != file_path]
             self._set_recent_files(files)
             self._save_settings_best_effort()
@@ -230,10 +252,6 @@ class MainWindow(QMainWindow):
         self._load_csv_path(path)
 
     def _save_settings_best_effort(self) -> None:
-        """Persist settings if the settings layer exists.
-
-        Does nothing if func.models.settings / func.io.settings_store do not exist yet.
-        """
         try:
             from func.io.settings_store import save_settings  # type: ignore
             from func.models.settings import AppSettings  # type: ignore
@@ -244,11 +262,9 @@ class MainWindow(QMainWindow):
             settings = AppSettings.from_app_state(self.state)
             save_settings(settings.to_dict())
         except Exception:
-            # Never break app flow due to persistence.
             return
 
     def _restore_last_session(self) -> None:
-        """Best-effort: open the last file from settings if it still exists."""
         last = getattr(self.state, "last_file_path", None)
         if not last:
             return
@@ -257,7 +273,6 @@ class MainWindow(QMainWindow):
         if not path.exists():
             return
 
-        # Load the dataset; _load_csv_path will also refresh menus and plot.
         self._load_csv_path(path)
 
     def _toggle_format_dock(self, checked: bool) -> None:
@@ -267,7 +282,6 @@ class MainWindow(QMainWindow):
             self.format_dock.hide()
 
     def _on_format_dock_visibility_changed(self, visible: bool) -> None:
-        # Keep the View menu toggle in sync.
         if hasattr(self, "toggle_format_action"):
             self.toggle_format_action.blockSignals(True)
             try:
@@ -276,18 +290,28 @@ class MainWindow(QMainWindow):
                 self.toggle_format_action.blockSignals(False)
 
     def _df_provider(self, file_path: str):
-        # Return the DataFrame for a given file path, using cache if possible.
-        # Each curve's file_path is unique per file, so cache is keyed by file_path.
+        # For derived datasets (path missing), fall back to datasets kept in AppState.
         if file_path in self._df_cache:
             return self._df_cache[file_path]
+
+        if not file_path:
+            current = getattr(self.state, "current_dataset", None)
+            if current is not None and getattr(current, "path", None) is None:
+                return current.df
+            for ds in getattr(self.state, "derived_datasets", []) or []:
+                if getattr(ds, "path", None) is None:
+                    return ds.df
+            return None
+
         path = Path(file_path)
         if not path.exists():
             return None
+
         try:
             df = load_csv(path)
         except Exception:
             return None
-        # Cache the DataFrame for this file path, but do NOT overwrite previous entries.
+
         self._df_cache[file_path] = df
         return df
 
@@ -299,7 +323,7 @@ class MainWindow(QMainWindow):
                 self._df_provider,
                 curves,
                 self.state.format,
-                clear=not getattr(self.state, "overlay_enabled", True)
+                clear=not getattr(self.state, "overlay_enabled", True),
             )
             self.statusBar().showMessage(result.message)
             return
@@ -324,7 +348,6 @@ class MainWindow(QMainWindow):
         self._save_settings_best_effort()
 
     def _on_overlay_toggled(self, enabled: bool) -> None:
-        # Overlay state lives in AppState (not PlotFormat)
         self.state.overlay_enabled = bool(enabled)
         self._save_settings_best_effort()
         self.statusBar().showMessage(
@@ -332,7 +355,6 @@ class MainWindow(QMainWindow):
         )
 
     def _on_add_curve_requested(self) -> None:
-        # Add the current selection as a curve (for multi-curve workflow)
         ds = self.state.current_dataset
         sel = self.state.selection
         if ds is None or sel is None or not sel.x_col or not sel.y_col:
@@ -343,22 +365,23 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Maintain overlay logic
         if not hasattr(self.state, "overlay_enabled"):
             self.state.overlay_enabled = True
         if not hasattr(self.state, "curves") or self.state.curves is None:
             self.state.curves = []
         if not getattr(self.state, "overlay_enabled", True):
-            self.state.curves = []  # Only clear if overlay disabled
+            self.state.curves = []
+
         curve = {
             "id": str(uuid4()),
             "dataset": ds.name,
-            "path": str(ds.path),
+            "path": str(ds.path) if ds.path is not None else "",
             "x_col": sel.x_col,
             "y_col": sel.y_col,
+            "y_err_col": getattr(sel, "y_err_col", "") or "",
             "mode": getattr(self.state.format, "mode", "line"),
-            "label": f"{sel.y_col} vs {sel.x_col}",
-            "visible": True
+            "label": f"{sel.y_col} vs {sel.x_col} ({getattr(self.state.format, 'mode', 'line')})",
+            "visible": True,
         }
         self.state.curves.append(curve)
         self.curves_panel.set_curves(self.state.curves)
@@ -385,7 +408,11 @@ class MainWindow(QMainWindow):
         self._replot_if_possible()
 
     def _on_curve_remove_requested(self, curve_id: str) -> None:
-        curves = [c for c in getattr(self.state, "curves", []) if not (isinstance(c, dict) and c.get("id") == curve_id)]
+        curves = [
+            c
+            for c in getattr(self.state, "curves", [])
+            if not (isinstance(c, dict) and c.get("id") == curve_id)
+        ]
         self.state.curves = curves
         self.curves_panel.set_curves(curves)
         self._save_settings_best_effort()
@@ -404,7 +431,6 @@ class MainWindow(QMainWindow):
             self.curves_dock.hide()
 
     def _on_curves_dock_visibility_changed(self, visible: bool) -> None:
-        # Keep the View menu toggle in sync.
         if hasattr(self, "toggle_curves_action"):
             self.toggle_curves_action.blockSignals(True)
             try:
@@ -412,8 +438,124 @@ class MainWindow(QMainWindow):
             finally:
                 self.toggle_curves_action.blockSignals(False)
 
+    def _toggle_analysis_dock(self, checked: bool) -> None:
+        if checked:
+            self.analysis_dock.show()
+        else:
+            self.analysis_dock.hide()
+
+    def _on_analysis_dock_visibility_changed(self, visible: bool) -> None:
+        if hasattr(self, "toggle_analysis_action"):
+            self.toggle_analysis_action.blockSignals(True)
+            try:
+                self.toggle_analysis_action.setChecked(bool(visible))
+            finally:
+                self.toggle_analysis_action.blockSignals(False)
+
+    def _on_analysis_cleared(self) -> None:
+        self.statusBar().showMessage("Analysis form cleared")
+
+    def _on_analysis_requested(self, req: AnalysisRequest) -> None:
+        ds = self.state.current_dataset
+        if ds is None:
+            QMessageBox.information(
+                self,
+                "No dataset",
+                "Import a dataset before creating a derived dataset.",
+            )
+            return
+
+        if not req.result_name.strip():
+            QMessageBox.warning(self, "Missing result name", "Please enter a result dataset name.")
+            return
+        if not req.value_column.strip():
+            QMessageBox.warning(self, "Missing value column", "Please enter an output value column name.")
+            return
+        if not req.expression.strip():
+            QMessageBox.warning(self, "Missing expression", "Please enter an expression.")
+            return
+
+        error_map: dict[str, str] | None = None
+        if req.use_error_propagation:
+            error_map = dict(getattr(self.state, "error_column_map", {}) or {})
+            sel = getattr(self.state, "selection", None)
+            if sel is not None and getattr(sel, "y_col", "") and getattr(sel, "y_err_col", ""):
+                error_map.setdefault(str(sel.y_col), str(sel.y_err_col))
+
+            if not error_map:
+                QMessageBox.warning(
+                    self,
+                    "Missing error mapping",
+                    "No error-column mapping is available. Populate AppState.error_column_map first.",
+                )
+                return
+
+        try:
+            result = build_derived_dataset(
+                source=ds,
+                expr=req.expression,
+                result_name=req.result_name,
+                value_column=req.value_column,
+                error_columns=error_map,
+                error_column_name=req.error_column_name or None,
+            )
+        except ExpressionEngineError as e:
+            QMessageBox.warning(self, "Analysis failed", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Analysis failed", str(e))
+            return
+
+        derived_ds = result.dataset
+
+        if hasattr(self.state, "derived_datasets"):
+            self.state.derived_datasets.append(derived_ds)
+        if hasattr(self.state, "last_analysis_expression"):
+            self.state.last_analysis_expression = req.expression
+
+        self.state.current_dataset = derived_ds
+        if hasattr(self.state, "error_column_map") and result.error_column:
+            self.state.error_column_map[str(result.value_column)] = str(result.error_column)
+
+        preview_rows = 2000
+        preview_df = derived_ds.df.head(preview_rows)
+        self.table.setModel(PandasTableModel(preview_df))
+        self.table.resizeColumnsToContents()
+        self.table_label.setText(f"Dataset: {self.state.current_dataset.name}")
+        if not self.table.isVisible():
+            self.table.show()
+            self.splitter.setSizes([350, 650])
+
+        all_cols = [str(c) for c in derived_ds.df.columns]
+        numeric_cols = [str(c) for c in derived_ds.df.select_dtypes(include="number").columns]
+        sel = self.controls.set_columns(all_cols, numeric_cols)
+        self.analysis_panel.set_available_columns(all_cols)
+
+        x_col = derived_ds.x_col or (sel.x_col if sel is not None else "")
+        y_col = derived_ds.y_col or req.value_column
+        y_err_col = result.error_column or ""
+
+        try:
+            sel = self.controls.set_selection(
+                str(x_col or ""),
+                str(y_col or ""),
+                str(y_err_col or ""),
+            )
+        except Exception:
+            pass
+
+        self.state.selection = sel
+        self._replot_if_possible()
+        self._save_settings_best_effort()
+        self.statusBar().showMessage(f"Created derived dataset: {derived_ds.name}")
+
     def _on_selection_changed(self, sel: PlotSelection) -> None:
         self.state.selection = sel
+
+        if getattr(sel, "y_col", "") and getattr(sel, "y_err_col", ""):
+            if hasattr(self.state, "error_column_map"):
+                self.state.error_column_map[str(sel.y_col)] = str(sel.y_err_col)
+
         self._replot_if_possible()
         self._save_settings_best_effort()
 
@@ -431,50 +573,53 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Store in central state
         self.state.current_dataset = Dataset(name=path.name, path=path, df=df)
+        if hasattr(self.state, "error_column_map"):
+            self.state.error_column_map = {}
 
-        # Update recents
         self._update_recent_files(path)
         self._refresh_recent_menu()
 
-        # Update preview table (first N rows for responsiveness)
         preview_rows = 2000
         preview_df = df.head(preview_rows)
         self.table.setModel(PandasTableModel(preview_df))
         self.table.resizeColumnsToContents()
+        self.table_label.setText(f"Dataset: {self.state.current_dataset.name}")
 
-        # Reveal the preview panel after a successful import.
         if not self.table.isVisible():
             self.table.show()
             self.splitter.setSizes([350, 650])
 
         self.statusBar().showMessage(
-            f"Loaded {self.state.current_dataset.name} | {df.shape[0]} rows × {df.shape[1]} cols (preview {min(df.shape[0], preview_rows)} rows)"
+            f"Loaded {self.state.current_dataset.name} | {df.shape[0]} rows × {df.shape[1]} cols "
+            f"(preview {min(df.shape[0], preview_rows)} rows)"
         )
 
-        # Populate controls (prefer numeric columns for defaults)
         all_cols = [str(c) for c in df.columns]
-        numeric_cols = [str(c) for c in df.select_dtypes(include='number').columns]
+        numeric_cols = [str(c) for c in df.select_dtypes(include="number").columns]
         sel = self.controls.set_columns(all_cols, numeric_cols)
+        self.analysis_panel.set_available_columns(all_cols)
 
-        # If settings preloaded a selection, try to keep it (only if columns exist)
         pre_sel = getattr(self.state, "selection", None)
-        if pre_sel is not None and getattr(pre_sel, "x_col", None) in df.columns and getattr(pre_sel, "y_col", None) in df.columns:
+        if (
+            pre_sel is not None
+            and getattr(pre_sel, "x_col", None) in df.columns
+            and getattr(pre_sel, "y_col", None) in df.columns
+        ):
             try:
-                sel = self.controls.set_selection(str(pre_sel.x_col), str(pre_sel.y_col))
+                sel = self.controls.set_selection(
+                    str(pre_sel.x_col),
+                    str(pre_sel.y_col),
+                    str(getattr(pre_sel, "y_err_col", "") or ""),
+                )
             except Exception:
                 pass
 
-        # Persist selection and plot using current formatting
         self.state.selection = sel
-        self._replot_if_possible()  # Display imported CSV immediately
-
-        # Save settings snapshot
+        self._replot_if_possible()
         self._save_settings_best_effort()
 
     def export_plot(self) -> None:
-        # Require something to export.
         if self.state.current_dataset is None or self.state.selection is None:
             QMessageBox.information(
                 self,

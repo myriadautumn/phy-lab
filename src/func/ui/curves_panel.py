@@ -75,7 +75,26 @@ class CurvesPanel(QWidget):
                 if not cid:
                     continue
 
-                text = str(label) if label else str(cid)
+                # Format label as 'y vs x (mode)' for both dict-like and object-like curves.
+                try:
+                    y_col = c.get("y_col", "")
+                    x_col = c.get("x_col", "")
+                    mode = c.get("mode", "line")
+                except Exception:
+                    y_col = getattr(c, "y_col", "")
+                    x_col = getattr(c, "x_col", "")
+                    mode = getattr(c, "mode", "line")
+
+                y_col = str(y_col).strip() if y_col is not None else ""
+                x_col = str(x_col).strip() if x_col is not None else ""
+                mode = str(mode).strip() if mode is not None else "line"
+
+                text = (
+                    f"{y_col} vs {x_col} ({mode})"
+                    if y_col and x_col
+                    else (str(label) if label else str(cid))
+                )
+
                 item = QListWidgetItem(text)
                 item.setFlags(
                     item.flags()
