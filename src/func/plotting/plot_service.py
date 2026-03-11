@@ -12,6 +12,10 @@ if TYPE_CHECKING:
     from func.ui.controls_panel import PlotSelection
 
 
+DEFAULT_COLOR_CYCLE = ['b', 'r', 'g', 'm', 'c', 'y', 'k']
+DEFAULT_SYMBOL_CYCLE = ['o', 's', 't', 'd', '+', 'x']
+
+
 @dataclass(frozen=True)
 class PlotResult:
     ok: bool
@@ -69,6 +73,11 @@ def _plot_error_bars(plot_widget, x: np.ndarray, y: np.ndarray, y_err: np.ndarra
     if y_err is None or len(y_err) == 0:
         return
 
+    # Ensure y_err is a numeric array and non-empty
+    y_err = np.asarray(y_err, dtype=float)
+    if y_err.size == 0:
+        return
+
     err_item = pg.ErrorBarItem(x=x, y=y, top=y_err, bottom=y_err, beam=0.15)
     plot_widget.addItem(err_item)
 
@@ -81,6 +90,8 @@ def plot_xy(
     mode: str = "line",
     *,
     y_err_col: str | None = None,
+    color: str | None = None,
+    symbol: str | None = None,
     clear: bool = False,
     sort_by_x: bool = True,
     line_width: int | None = None,
@@ -114,26 +125,67 @@ def plot_xy(
 
     mode = str(mode) if mode else "line"
     if mode == "scatter":
-        if curve_name:
-            plot_widget.plot(x, y, pen=None, symbol="o", symbolSize=int(marker_size), name=curve_name)
-        else:
-            plot_widget.plot(x, y, pen=None, symbol="o", symbolSize=int(marker_size))
+        # In pyqtgraph, pen=None draws a default line. pen=pg.mkPen(None) hides the line.
+        plot_widget.plot(x, y, pen=pg.mkPen(None),
+                         symbol=symbol or 'o', symbolSize=int(marker_size), name=curve_name,
+                         symbolBrush=color or 'b')
     else:
-        if line_width is None:
-            if curve_name:
-                plot_widget.plot(x, y, name=curve_name)
-            else:
-                plot_widget.plot(x, y)
-        else:
-            pen = pg.mkPen(width=int(line_width))
-            if curve_name:
-                plot_widget.plot(x, y, pen=pen, name=curve_name)
-            else:
-                plot_widget.plot(x, y, pen=pen)
+        pen = pg.mkPen(color=color, width=int(line_width)) if color else (pg.mkPen(width=int(line_width)) if line_width else None)
+        plot_widget.plot(x, y, pen=pen, name=curve_name)
 
     _plot_error_bars(plot_widget, x, y, y_err)
 
     return PlotResult(True, f"Plotted {x_col} vs {y_col} ({mode}).")
+
+def _apply_format(plot_widget, fmt: "PlotFormat") -> None:
+    """Apply shared formatting (grid, scales, legend, title) to a plot widget."""
+    plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
+    plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
+
+    # Legend
+    legend = getattr(plot_widget.plotItem, "legend", None)
+    if bool(fmt.legend):
+        if legend is None:
+            plot_widget.addLegend()
+    else:
+        if legend is not None:
+            plot_widget.plotItem.removeItem(legend)
+            plot_widget.plotItem.legend = None
+
+    # Title
+    if bool(fmt.title_enabled) and (fmt.title or "").strip():
+        plot_widget.setTitle((fmt.title or "").strip())
+    else:
+        plot_widget.setTitle("")
+
+
+def _apply_limits(plot_widget, fmt: "PlotFormat") -> None:
+    """Apply axis limits from PlotFormat to a plot widget."""
+    if fmt.x_limits.auto:
+        plot_widget.enableAutoRange(axis="x", enable=True)
+    else:
+        plot_widget.enableAutoRange(axis="x", enable=False)
+        if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
+            plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
+        elif fmt.x_limits.vmin is not None:
+            xr = plot_widget.plotItem.vb.viewRange()[0]
+            plot_widget.setXRange(float(fmt.x_limits.vmin), float(xr[1]), padding=0)
+        elif fmt.x_limits.vmax is not None:
+            xr = plot_widget.plotItem.vb.viewRange()[0]
+            plot_widget.setXRange(float(xr[0]), float(fmt.x_limits.vmax), padding=0)
+
+    if fmt.y_limits.auto:
+        plot_widget.enableAutoRange(axis="y", enable=True)
+    else:
+        plot_widget.enableAutoRange(axis="y", enable=False)
+        if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
+            plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
+        elif fmt.y_limits.vmin is not None:
+            yr = plot_widget.plotItem.vb.viewRange()[1]
+            plot_widget.setYRange(float(fmt.y_limits.vmin), float(yr[1]), padding=0)
+        elif fmt.y_limits.vmax is not None:
+            yr = plot_widget.plotItem.vb.viewRange()[1]
+            plot_widget.setYRange(float(yr[0]), float(fmt.y_limits.vmax), padding=0)
 
 
 def render_plot(
@@ -157,27 +209,7 @@ def render_plot(
     if clear:
         plot_widget.clear()
 
-    # Grid
-    plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
-
-    # Scales
-    plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
-
-    # Legend
-    legend = getattr(plot_widget.plotItem, "legend", None)
-    if bool(fmt.legend):
-        if legend is None:
-            plot_widget.addLegend()
-    else:
-        if legend is not None:
-            plot_widget.plotItem.removeItem(legend)
-            plot_widget.plotItem.legend = None
-
-    # Title
-    if bool(fmt.title_enabled) and (fmt.title or "").strip():
-        plot_widget.setTitle((fmt.title or "").strip())
-    else:
-        plot_widget.setTitle("")
+    _apply_format(plot_widget, fmt)
 
     # Axis labels
     xlabel = x_col
@@ -211,32 +243,7 @@ def render_plot(
     if not res.ok:
         return res
 
-    # Limits
-    if fmt.x_limits.auto:
-        plot_widget.enableAutoRange(axis="x", enable=True)
-    else:
-        plot_widget.enableAutoRange(axis="x", enable=False)
-        if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
-            plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
-        elif fmt.x_limits.vmin is not None:
-            xr = plot_widget.plotItem.vb.viewRange()[0]
-            plot_widget.setXRange(float(fmt.x_limits.vmin), float(xr[1]), padding=0)
-        elif fmt.x_limits.vmax is not None:
-            xr = plot_widget.plotItem.vb.viewRange()[0]
-            plot_widget.setXRange(float(xr[0]), float(fmt.x_limits.vmax), padding=0)
-
-    if fmt.y_limits.auto:
-        plot_widget.enableAutoRange(axis="y", enable=True)
-    else:
-        plot_widget.enableAutoRange(axis="y", enable=False)
-        if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
-            plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
-        elif fmt.y_limits.vmin is not None:
-            yr = plot_widget.plotItem.vb.viewRange()[1]
-            plot_widget.setYRange(float(fmt.y_limits.vmin), float(yr[1]), padding=0)
-        elif fmt.y_limits.vmax is not None:
-            yr = plot_widget.plotItem.vb.viewRange()[1]
-            plot_widget.setYRange(float(yr[0]), float(fmt.y_limits.vmax), padding=0)
+    _apply_limits(plot_widget, fmt)
 
     return PlotResult(True, f"Rendered {y_col} vs {x_col}")
 
@@ -300,29 +307,11 @@ def render_curves(
     if clear:
         plot_widget.clear()
 
-    # Apply global formatting (grid/scales/legend/title) once before plotting curves
-    plot_widget.showGrid(x=bool(fmt.grid), y=bool(fmt.grid), alpha=0.3)
-    plot_widget.setLogMode(x=(fmt.x_scale == "log"), y=(fmt.y_scale == "log"))
-
-    # Legend
-    legend = getattr(plot_widget.plotItem, "legend", None)
-    if bool(fmt.legend):
-        if legend is None:
-            plot_widget.addLegend()
-    else:
-        if legend is not None:
-            plot_widget.plotItem.removeItem(legend)
-            plot_widget.plotItem.legend = None
-
-    # Title
-    if bool(fmt.title_enabled) and (fmt.title or "").strip():
-        plot_widget.setTitle((fmt.title or "").strip())
-    else:
-        plot_widget.setTitle("")
+    _apply_format(plot_widget, fmt)
 
     # Draw each curve independently without clearing the plot
     rendered = 0
-    for c in visible:
+    for idx, c in enumerate(visible):
         path = None
         x_col = None
         y_col = None
@@ -352,6 +341,21 @@ def render_curves(
         if df is None:
             continue
 
+        # Auto-assign color and symbol if not specified
+        try:
+            color = c.get('color')
+        except Exception:
+            color = getattr(c, 'color', None)
+        if not color:
+            color = DEFAULT_COLOR_CYCLE[idx % len(DEFAULT_COLOR_CYCLE)]
+
+        try:
+            symbol = c.get('symbol')
+        except Exception:
+            symbol = getattr(c, 'symbol', None)
+        if not symbol:
+            symbol = DEFAULT_SYMBOL_CYCLE[idx % len(DEFAULT_SYMBOL_CYCLE)]
+
         curve_name = str(label) if label else f"{y_col} vs {x_col}"
         mode_str = str(mode) if mode else fmt.mode
         res = plot_xy(
@@ -367,6 +371,8 @@ def render_curves(
             marker_size=int(fmt.marker_size),
             curve_name=curve_name if bool(fmt.legend) else None,
             set_labels=False,
+            color=color,
+            symbol=symbol
         )
         if res.ok:
             rendered += 1
@@ -389,20 +395,7 @@ def render_curves(
     plot_widget.setLabel("bottom", xlabel)
     plot_widget.setLabel("left", ylabel)
 
-    # Apply limits after plotting all curves
-    if fmt.x_limits.auto:
-        plot_widget.enableAutoRange(axis="x", enable=True)
-    else:
-        plot_widget.enableAutoRange(axis="x", enable=False)
-        if fmt.x_limits.vmin is not None and fmt.x_limits.vmax is not None:
-            plot_widget.setXRange(float(fmt.x_limits.vmin), float(fmt.x_limits.vmax), padding=0)
-
-    if fmt.y_limits.auto:
-        plot_widget.enableAutoRange(axis="y", enable=True)
-    else:
-        plot_widget.enableAutoRange(axis="y", enable=False)
-        if fmt.y_limits.vmin is not None and fmt.y_limits.vmax is not None:
-            plot_widget.setYRange(float(fmt.y_limits.vmin), float(fmt.y_limits.vmax), padding=0)
+    _apply_limits(plot_widget, fmt)
 
     return PlotResult(True, f"Rendered {rendered} curve(s)")
 

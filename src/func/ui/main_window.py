@@ -6,6 +6,7 @@ from uuid import uuid4
 from PyQt6.QtWidgets import QLabel
 
 import pyqtgraph as pg
+import numpy as np
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
@@ -23,12 +24,19 @@ from func.analysis.expression_engine import (
     ExpressionEngineError,
     build_derived_dataset,
 )
+from func.analysis.curve_fitter import perform_fit
+from func.analysis.peak_analyzer import detect_peaks
 from func.io.csv_importer import load_csv
 from func.models.app_state import AppState
 from func.models.dataset import Dataset
 from func.models.table_model import PandasTableModel
 from func.plotting.plot_service import export_plot_png, render_curves, render_plot
-from func.ui.analysis_panel import AnalysisPanel, AnalysisRequest
+from func.ui.analysis_panel import (
+    AnalysisPanel,
+    AnalysisRequest,
+    FitRequest,
+    PeakAnalysisRequest,
+)
 from func.ui.controls_panel import ControlsPanel, PlotSelection
 from func.ui.curves_panel import CurvesPanel
 from func.ui.format_panel import FormatPanel
@@ -43,6 +51,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
         self._df_cache: dict[str, object] = {}
+        self._peak_scatter_item = None  # pyqtgraph item for peak markers
+        self._peak_data: dict | None = None  # {"x": array, "y": array}
+        self._fit_plot_item = None  # pyqtgraph item for curve fit line
+        self._fit_data: dict | None = None  # {"x": array, "y": array}
 
         # Plot
         self.plot = pg.PlotWidget()
@@ -108,6 +120,9 @@ class MainWindow(QMainWindow):
         # Analysis panel dock (hidden by default)
         self.analysis_panel = AnalysisPanel()
         self.analysis_panel.analysis_requested.connect(self._on_analysis_requested)
+        self.analysis_panel.peak_analysis_requested.connect(self._on_peak_analysis_requested)
+        self.analysis_panel.fit_requested.connect(self._on_fit_requested)
+        self.analysis_panel.clear_fit_requested.connect(self._on_clear_fit_requested)
         self.analysis_panel.clear_requested.connect(self._on_analysis_cleared)
 
         self.analysis_dock = QDockWidget("Analysis", self)
@@ -191,7 +206,8 @@ class MainWindow(QMainWindow):
         p = str(path)
         files = [f for f in self._get_recent_files() if f != p]
         files.insert(0, p)
-        files = files[:max_items]
+        while len(files) > max_items:
+            files.pop()
         self._set_recent_files(files)
         if hasattr(self.state, "last_file_path"):
             setattr(self.state, "last_file_path", p)
@@ -315,6 +331,44 @@ class MainWindow(QMainWindow):
         self._df_cache[file_path] = df
         return df
 
+    def _draw_peak_overlay(self) -> None:
+        """Draw stored peak markers on top of the current plot."""
+        # Remove old peak scatter item if present
+        if self._peak_scatter_item is not None:
+            self.plot.removeItem(self._peak_scatter_item)
+            self._peak_scatter_item = None
+
+        if self._peak_data is None:
+            return
+
+        scatter = pg.ScatterPlotItem(
+            x=self._peak_data["x"],
+            y=self._peak_data["y"],
+            symbol="x",
+            size=14,
+            pen=pg.mkPen("r", width=2),
+            brush=pg.mkBrush("r"),
+        )
+        self.plot.addItem(scatter)
+        self._peak_scatter_item = scatter
+
+    def _draw_fit_overlay(self) -> None:
+        """Draw fitted curve line on top of the current plot."""
+        if self._fit_plot_item is not None:
+            self.plot.removeItem(self._fit_plot_item)
+            self._fit_plot_item = None
+
+        if self._fit_data is None:
+            return
+
+        fit_line = pg.PlotDataItem(
+            x=self._fit_data["x"],
+            y=self._fit_data["y"],
+            pen=pg.mkPen("cyan", width=3, style=Qt.PenStyle.DashLine)
+        )
+        self.plot.addItem(fit_line)
+        self._fit_plot_item = fit_line
+
     def _replot_if_possible(self) -> None:
         curves = getattr(self.state, "curves", []) or []
         if curves:
@@ -326,6 +380,8 @@ class MainWindow(QMainWindow):
                 clear=not getattr(self.state, "overlay_enabled", True),
             )
             self.statusBar().showMessage(result.message)
+            self._draw_fit_overlay()
+            self._draw_peak_overlay()
             return
 
         ds = self.state.current_dataset
@@ -341,6 +397,8 @@ class MainWindow(QMainWindow):
             return
 
         self.statusBar().showMessage(result.message)
+        self._draw_fit_overlay()
+        self._draw_peak_overlay()
 
     def _on_format_changed(self, fmt) -> None:
         self.state.format = fmt
@@ -365,6 +423,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Initialize overlay and curves list
         if not hasattr(self.state, "overlay_enabled"):
             self.state.overlay_enabled = True
         if not hasattr(self.state, "curves") or self.state.curves is None:
@@ -372,24 +431,38 @@ class MainWindow(QMainWindow):
         if not getattr(self.state, "overlay_enabled", True):
             self.state.curves = []
 
+        # Prepare curve dictionary
         curve = {
             "id": str(uuid4()),
             "dataset": ds.name,
-            "path": str(ds.path) if ds.path is not None else "",
+            "path": str(ds.path) if ds.path else "",
             "x_col": sel.x_col,
             "y_col": sel.y_col,
             "y_err_col": getattr(sel, "y_err_col", "") or "",
             "mode": getattr(self.state.format, "mode", "line"),
             "label": f"{sel.y_col} vs {sel.x_col} ({getattr(self.state.format, 'mode', 'line')})",
             "visible": True,
+            "color": None,
+            "symbol": None,
         }
+
+        # Assign color and symbol from format panel if user selected, else auto
+        color_combo = getattr(self.format_panel, 'color_combo', None)
+        symbol_combo = getattr(self.format_panel, 'symbol_combo', None)
+        if color_combo and color_combo.currentText() != 'Auto':
+            curve['color'] = color_combo.currentText()
+        if symbol_combo and symbol_combo.currentText() != 'Auto':
+            curve['symbol'] = symbol_combo.currentText()
+
+        # Append to curves and refresh UI
         self.state.curves.append(curve)
         self.curves_panel.set_curves(self.state.curves)
         self._replot_if_possible()
         self._save_settings_best_effort()
-        self.statusBar().showMessage(
-            f"Added curve: {curve['label']} (total {len(self.state.curves)})"
-        )
+
+        # Update table label
+        self.table_label.setText(f"Dataset: {self.state.current_dataset.name}")
+        self.statusBar().showMessage(f"Added curve: {curve['label']} (total {len(self.state.curves)})")
 
     def _on_curve_visibility_changed(self, curve_id: str, visible: bool) -> None:
         for c in getattr(self.state, "curves", []):
@@ -521,6 +594,7 @@ class MainWindow(QMainWindow):
         preview_df = derived_ds.df.head(preview_rows)
         self.table.setModel(PandasTableModel(preview_df))
         self.table.resizeColumnsToContents()
+        # Update table label to reflect the derived dataset
         self.table_label.setText(f"Dataset: {self.state.current_dataset.name}")
         if not self.table.isVisible():
             self.table.show()
@@ -530,7 +604,10 @@ class MainWindow(QMainWindow):
         numeric_cols = [str(c) for c in derived_ds.df.select_dtypes(include="number").columns]
         sel = self.controls.set_columns(all_cols, numeric_cols)
         self.analysis_panel.set_available_columns(all_cols)
+        self.analysis_panel.set_peak_columns(all_cols)
+        self.analysis_panel.set_fit_columns(all_cols)
 
+        # Optional: auto-select the new result as Y to plot it immediately.
         x_col = derived_ds.x_col or (sel.x_col if sel is not None else "")
         y_col = derived_ds.y_col or req.value_column
         y_err_col = result.error_column or ""
@@ -548,6 +625,114 @@ class MainWindow(QMainWindow):
         self._replot_if_possible()
         self._save_settings_best_effort()
         self.statusBar().showMessage(f"Created derived dataset: {derived_ds.name}")
+
+    def _on_peak_analysis_requested(self, req: PeakAnalysisRequest) -> None:
+        ds = self.state.current_dataset
+        if ds is None:
+            QMessageBox.information(
+                self,
+                "No dataset",
+                "Import a dataset before peak analysis.",
+            )
+            return
+
+        if not req.x_column or not req.y_column:
+            QMessageBox.warning(self, "Missing columns", "Please select X and Y columns.")
+            return
+
+        try:
+            peak_result = detect_peaks(
+                dataset=ds,
+                x_col=req.x_column,
+                y_col=req.y_column,
+                height=req.min_height if req.min_height else None,
+                distance=int(req.min_distance) if req.min_distance else None,
+                prominence=req.min_prominence if req.min_prominence else None,
+                width=req.width if req.width else None
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Peak Analysis failed", str(e))
+            return
+
+        if len(peak_result.x_positions) == 0:
+            # Clear any existing peak markers
+            self._peak_data = None
+            self._draw_peak_overlay()
+            QMessageBox.information(self, "No peaks", "No peaks found with the current parameters.")
+            return
+
+        # Store peak data for overlay drawing
+        self._peak_data = {
+            "x": np.asarray(peak_result.x_positions, dtype=float),
+            "y": np.asarray(peak_result.y_values, dtype=float),
+        }
+
+        # Draw peak markers on top of the existing plot
+        self._draw_peak_overlay()
+        self.statusBar().showMessage(f"Found {len(peak_result.x_positions)} peaks.")
+
+    def _on_fit_requested(self, req: FitRequest) -> None:
+        ds = self.state.current_dataset
+        if ds is None or req.x_column not in ds.df.columns or req.y_column not in ds.df.columns:
+            QMessageBox.warning(self, "Fit Error", "Select valid X and Y columns.")
+            return
+
+        x = ds.df[req.x_column].to_numpy()
+        y = ds.df[req.y_column].to_numpy()
+
+        # Parse initial params if provided
+        p0 = None
+        if req.initial_params:
+            try:
+                p0 = [float(p.strip()) for p in req.initial_params.split(",") if p.strip()]
+            except ValueError:
+                QMessageBox.warning(self, "Fit Error", "Initial parameters must be comma-separated numbers.")
+                return
+
+        # Perform fit
+        self.statusBar().showMessage(f"Fitting {req.model_name}...")
+        try:
+            res = perform_fit(x, y, req.model_name, p0=p0)
+        except Exception as e:
+            QMessageBox.warning(self, "Fit Error", str(e))
+            self.statusBar().showMessage("Fit failed.")
+            return
+
+        if not res.success:
+            QMessageBox.warning(self, "Fit Failed", res.message)
+            self.statusBar().showMessage(res.message)
+            return
+
+        # Format results for text box
+        lines = [
+            f"Model: {res.model_name}",
+            f"Equation: {res.expression_str}",
+            f"R²: {res.r_squared:.4f}",
+            f"χ²: {res.chi_squared:.4e}",
+            "",
+            "Parameters:"
+        ]
+        for name, val in res.params.items():
+            err = res.param_errors.get(name, 0.0)
+            lines.append(f"  {name} = {val:.4e} ± {err:.4e}")
+
+        self.analysis_panel.set_fit_results("\n".join(lines))
+
+        # Store smooth curve data
+        self._fit_data = {
+            "x": res.x_fit,
+            "y": res.y_fit,
+        }
+
+        self._draw_fit_overlay()
+        self.statusBar().showMessage(f"Fit completed: R² = {res.r_squared:.4f}")
+
+    def _on_clear_fit_requested(self) -> None:
+        if self._fit_plot_item is not None:
+            self.plot.removeItem(self._fit_plot_item)
+            self._fit_plot_item = None
+        self._fit_data = None
+        self.statusBar().showMessage("Fit overlay cleared.")
 
     def _on_selection_changed(self, sel: PlotSelection) -> None:
         self.state.selection = sel
@@ -599,6 +784,8 @@ class MainWindow(QMainWindow):
         numeric_cols = [str(c) for c in df.select_dtypes(include="number").columns]
         sel = self.controls.set_columns(all_cols, numeric_cols)
         self.analysis_panel.set_available_columns(all_cols)
+        self.analysis_panel.set_peak_columns(all_cols)
+        self.analysis_panel.set_fit_columns(all_cols)
 
         pre_sel = getattr(self.state, "selection", None)
         if (

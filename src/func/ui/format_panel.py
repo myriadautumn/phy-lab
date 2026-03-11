@@ -83,6 +83,16 @@ class FormatPanel(QWidget):
         self.add_curve_btn.setToolTip("Add the current X/Y as a new curve (used when Overlay is enabled).")
         style_layout.addRow("", self.add_curve_btn)
 
+        # Curve color
+        self.color_combo = QComboBox()
+        self.color_combo.addItems(["Auto", "b", "r", "g", "m", "c", "y", "k"])
+        style_layout.addRow("Curve color", self.color_combo)
+
+        # Curve symbol
+        self.symbol_combo = QComboBox()
+        self.symbol_combo.addItems(["Auto", "o", "s", "t", "d", "+", "x"])
+        style_layout.addRow("Curve symbol", self.symbol_combo)
+
         root.addWidget(style_box)
 
         # --- Text ---
@@ -189,6 +199,9 @@ class FormatPanel(QWidget):
         self.overlay_chk.toggled.connect(self.overlay_toggled.emit)  # type: ignore[attr-defined]
         self.add_curve_btn.clicked.connect(self.add_curve_requested.emit)  # type: ignore[attr-defined]
 
+        self.color_combo.currentIndexChanged.connect(self._emit_format)  # type: ignore
+        self.symbol_combo.currentIndexChanged.connect(self._emit_format)  # type: ignore
+
         # Ensure mode selection affects the curve added
         self.mode_group.buttonToggled.connect(lambda b, checked: self._update_mode())
 
@@ -263,6 +276,9 @@ class FormatPanel(QWidget):
         lw = int(self.line_width_spin.value())
         line_width = None if lw <= 0 else lw
 
+        color = None if self.color_combo.currentText() == "Auto" else self.color_combo.currentText()
+        symbol = None if self.symbol_combo.currentText() == "Auto" else self.symbol_combo.currentText()
+
         return PlotFormat(
             mode=mode,
             title_enabled=self.title_enabled.isChecked(),
@@ -280,6 +296,8 @@ class FormatPanel(QWidget):
             line_width=line_width,
             marker_size=int(self.marker_size_spin.value()),
             sort_by_x=self.sort_by_x_chk.isChecked(),
+            color=color,
+            symbol=symbol,
         )
 
     def set_format(self, fmt: PlotFormat) -> None:
@@ -320,6 +338,20 @@ class FormatPanel(QWidget):
             self.y_auto_chk.setChecked(bool(fmt.y_limits.auto))
             self.y_min_edit.setText("" if fmt.y_limits.vmin is None else str(fmt.y_limits.vmin))
             self.y_max_edit.setText("" if fmt.y_limits.vmax is None else str(fmt.y_limits.vmax))
+
+            # Curve color
+            color = getattr(fmt, "color", None)
+            if color is None or color == "":
+                self._set_combo_text(self.color_combo, "Auto")
+            else:
+                self._set_combo_text(self.color_combo, color)
+
+            # Curve symbol
+            symbol = getattr(fmt, "symbol", None)
+            if symbol is None or symbol == "":
+                self._set_combo_text(self.symbol_combo, "Auto")
+            else:
+                self._set_combo_text(self.symbol_combo, symbol)
 
             self._sync_limits_enabled()
         finally:

@@ -42,3 +42,5 @@ class PlotFormat:
     line_width: Optional[int] = None
     marker_size: int = 5
     sort_by_x: bool = True
+    color: Optional[str] = None
+    symbol: Optional[str] = None
