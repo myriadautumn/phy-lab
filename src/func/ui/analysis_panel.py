@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QAbstractTableModel, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTableView,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -33,6 +34,7 @@ class AnalysisRequest:
 @dataclass(frozen=True)
 class PeakAnalysisRequest:
     dataset_name: str
+    direction: str  # 'Peaks' or 'Troughs'
     x_column: str
     y_column: str
     min_height: float
@@ -70,6 +72,7 @@ class AnalysisPanel(QWidget):
     peak_analysis_requested = pyqtSignal(object)  # emits PeakAnalysisRequest
     fit_requested = pyqtSignal(object)  # emits FitRequest
     clear_fit_requested = pyqtSignal()
+    roi_toggled = pyqtSignal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -81,6 +84,23 @@ class AnalysisPanel(QWidget):
         title = QLabel("Analysis / Transformation")
         root.addWidget(title)
 
+        # ── ROI Group ────────────────────────────────────────────────
+        roi_box = QGroupBox("Region of Interest (ROI)")
+        roi_layout = QVBoxLayout(roi_box)
+        
+        self.roi_checkbox = QCheckBox("Enable ROI bounds for stats & analysis")
+        self.roi_checkbox.toggled.connect(self.roi_toggled.emit)
+        
+        self.roi_stats_text = QTextEdit()
+        self.roi_stats_text.setReadOnly(True)
+        self.roi_stats_text.setMaximumHeight(80)
+        self.roi_stats_text.setPlaceholderText("ROI disabled. Check above to enable.")
+        
+        roi_layout.addWidget(self.roi_checkbox)
+        roi_layout.addWidget(self.roi_stats_text)
+        root.addWidget(roi_box)
+
+        # ── Derived Dataset Group ────────────────────────────────────
         expr_box = QGroupBox("Derived Dataset")
         expr_layout = QFormLayout(expr_box)
 
@@ -106,12 +126,21 @@ class AnalysisPanel(QWidget):
         expr_layout.addRow("", self.use_error_chk)
         expr_layout.addRow("Error column", self.error_column_name_edit)
 
+        btn_row = QHBoxLayout()
+        self.apply_btn = QPushButton("Create Derived Dataset")
+        self.clear_btn = QPushButton("Clear")
+        btn_row.addWidget(self.apply_btn)
+        btn_row.addWidget(self.clear_btn)
+        expr_layout.addRow(btn_row)
+
         root.addWidget(expr_box)
 
         # Peak Analyzer Group
         peak_box = QGroupBox("Peak Analyzer")
         peak_layout = QFormLayout(peak_box)
 
+        self.peak_direction_combo = QComboBox()
+        self.peak_direction_combo.addItems(["Peaks", "Troughs"])
         self.peak_x_combo = QComboBox()
         self.peak_y_combo = QComboBox()
         self.peak_height_edit = QLineEdit()
@@ -124,6 +153,7 @@ class AnalysisPanel(QWidget):
         self.peak_distance_edit.setPlaceholderText("Min Distance (optional)")
         self.peak_width_edit.setPlaceholderText("Width (optional)")
 
+        peak_layout.addRow("Direction", self.peak_direction_combo)
         peak_layout.addRow("X column", self.peak_x_combo)
         peak_layout.addRow("Y column", self.peak_y_combo)
         peak_layout.addRow("Min Height", self.peak_height_edit)
@@ -134,6 +164,14 @@ class AnalysisPanel(QWidget):
         # Add a button to trigger peak detection
         self.peak_detect_btn = QPushButton("Detect Peaks")
         peak_layout.addRow(self.peak_detect_btn)
+
+        self.peak_table = QTableView()
+        # Initial configuration for the table
+        self.peak_table.verticalHeader().setVisible(False)
+        self.peak_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.peak_table.setAlternatingRowColors(True)
+        self.peak_table.setMaximumHeight(200) # Give it a reasonable max height inside the scroll area / dock
+        peak_layout.addRow(self.peak_table)
 
         # Add to main layout
         root.addWidget(peak_box)
@@ -175,15 +213,6 @@ class AnalysisPanel(QWidget):
         fit_layout.addRow(self.fit_results_text)
 
         root.addWidget(fit_box)
-
-        # ── Bottom buttons ───────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        self.apply_btn = QPushButton("Create Derived Dataset")
-        self.clear_btn = QPushButton("Clear")
-        btn_row.addWidget(self.apply_btn)
-        btn_row.addWidget(self.clear_btn)
-        btn_row.addStretch(1)
-        root.addLayout(btn_row)
 
         root.addStretch(1)
 
@@ -237,6 +266,15 @@ class AnalysisPanel(QWidget):
             self.peak_x_combo.blockSignals(False)
             self.peak_y_combo.blockSignals(False)
 
+    def set_peak_model(self, model: "QAbstractTableModel") -> None:
+        """Display the PeakTableModel in the Peak Analyzer table."""
+        self.peak_table.setModel(model)
+        self.peak_table.resizeColumnsToContents()
+
+    def set_roi_stats(self, text: str) -> None:
+        """Update the ROI statistics text area."""
+        self.roi_stats_text.setPlainText(text)
+
     def set_fit_columns(self, columns: list[str]) -> None:
         """Populate X/Y column dropdowns for the curve fitting group."""
         current_x = self.fit_x_combo.currentText()
@@ -287,6 +325,7 @@ class AnalysisPanel(QWidget):
     def _emit_peak_request(self) -> None:
         req = PeakAnalysisRequest(
             dataset_name="",
+            direction=self.peak_direction_combo.currentText().strip(),
             x_column=self.peak_x_combo.currentText().strip(),
             y_column=self.peak_y_combo.currentText().strip(),
             min_height=float(self.peak_height_edit.text() or 0),

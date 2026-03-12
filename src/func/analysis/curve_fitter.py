@@ -13,6 +13,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 
 from func.models.fit_result import FitResult
+from func.analysis.roi_stats import get_roi_mask
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +298,7 @@ def perform_fit(
     model_name: str,
     p0: Optional[Sequence[float]] = None,
     num_points: int = 500,
+    x_range: Optional[tuple[float, float]] = None,
 ) -> FitResult:
     """Fit data to a named model.
 
@@ -306,6 +308,7 @@ def perform_fit(
     model_name : key in FIT_MODELS.
     p0 : optional initial parameter guess (overrides smart guess).
     num_points : number of points in the smooth fitted curve.
+    x_range : optional (min, max) X boundaries for a Region of Interest.
 
     Returns
     -------
@@ -320,23 +323,36 @@ def perform_fit(
             message=f"Unknown fit model: {model_name}",
         )
 
+    # Apply ROI mask
+    mask = get_roi_mask(x, x_range)
+    x_b = x[mask]
+    y_b = y[mask]
+
+    if len(x_b) < 2:
+        return FitResult(
+            model_name=model_name,
+            expression_str=FIT_MODELS[model_name].expression_str,
+            success=False,
+            message="Not enough points in Region of Interest to fit.",
+        )
+
     model = FIT_MODELS[model_name]
 
     # Use numpy polyfit for polynomial models (more stable)
     if model_name.startswith("Polynomial") or model_name == "Linear":
-        return _fit_polynomial(x, y, model, num_points)
+        return _fit_polynomial(x_b, y_b, model, num_points)
 
     # Initial guess
     if p0 is not None:
         initial = list(p0)
     else:
-        initial = _smart_initial_guess(model, x, y)
+        initial = _smart_initial_guess(model, x_b, y_b)
 
     try:
         popt, pcov = curve_fit(
             model.func,
-            x,
-            y,
+            x_b,
+            y_b,
             p0=initial,
             maxfev=10000,
         )
@@ -354,13 +370,13 @@ def perform_fit(
     params = {name: float(val) for name, val in zip(model.param_names, popt)}
     param_errors = {name: float(val) for name, val in zip(model.param_names, perr)}
 
-    # Predictions on original data for R²/χ²
-    y_pred = model.func(x, *popt)
-    r2 = _compute_r_squared(y, y_pred)
-    chi2 = _compute_chi_squared(y, y_pred)
+    # Predictions on original bounded data for R²/χ²
+    y_pred = model.func(x_b, *popt)
+    r2 = _compute_r_squared(y_b, y_pred)
+    chi2 = _compute_chi_squared(y_b, y_pred)
 
-    # Generate smooth curve
-    x_fit = np.linspace(float(np.min(x)), float(np.max(x)), num_points)
+    # Generate smooth curve over the bounded region
+    x_fit = np.linspace(float(np.min(x_b)), float(np.max(x_b)), num_points)
     y_fit = model.func(x_fit, *popt)
 
     return FitResult(

@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks, peak_widths
 
-# Import Dataset and PeakTableModel from your project structure
 from func.models.dataset import Dataset
 from func.models.peak_table_model import PeakTableModel
+from func.analysis.roi_stats import get_roi_mask
 
 
 class PeakResult:
@@ -33,23 +33,36 @@ def detect_peaks(
     height: Optional[float] = None,
     distance: Optional[int] = None,
     prominence: Optional[float] = None,
-    width: Optional[float] = None
+    width: Optional[float] = None,
+    x_range: Optional[tuple[float, float]] = None,
+    direction: str = "Peaks"
 ) -> PeakResult:
-    """Detect peaks in the dataset using SciPy's find_peaks"""
+    """Detect peaks in the dataset using SciPy's find_peaks, bounded by optional x_range."""
     df = dataset.df
     if x_col not in df.columns or y_col not in df.columns:
         raise ValueError(f"Columns {x_col} or {y_col} not found in dataset.")
 
-    x = df[x_col].to_numpy()
-    y = df[y_col].to_numpy()
+    x_full = df[x_col].to_numpy()
+    y_full = df[y_col].to_numpy()
 
-    # Detect peaks
-    peaks, properties = find_peaks(y, height=height, distance=distance, prominence=prominence)
+    # Apply ROI mask if provided
+    mask = get_roi_mask(x_full, x_range)
+    x = x_full[mask]
+    y = y_full[mask]
+    
+    if len(y) == 0:
+        return PeakResult(dataset.name, np.array([]), np.array([]), None, None)
+
+    is_trough = direction.lower().startswith("trough")
+    y_analyze = -y if is_trough else y
+
+    # Detect peaks on the bounded data
+    peaks, properties = find_peaks(y_analyze, height=height, distance=distance, prominence=prominence)
 
     # Compute widths if requested or if properties contain widths
     widths_arr = None
     if width is not None or 'widths' in properties:
-        results_half = peak_widths(y, peaks, rel_height=0.5)
+        results_half = peak_widths(y_analyze, peaks, rel_height=0.5)
         widths_arr = results_half[0]
 
     peak_vals = y[peaks]

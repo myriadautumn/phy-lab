@@ -26,6 +26,7 @@ from func.analysis.expression_engine import (
 )
 from func.analysis.curve_fitter import perform_fit
 from func.analysis.peak_analyzer import detect_peaks
+from func.analysis.roi_stats import compute_roi_stats
 from func.io.csv_importer import load_csv
 from func.models.app_state import AppState
 from func.models.dataset import Dataset
@@ -55,6 +56,7 @@ class MainWindow(QMainWindow):
         self._peak_data: dict | None = None  # {"x": array, "y": array}
         self._fit_plot_item = None  # pyqtgraph item for curve fit line
         self._fit_data: dict | None = None  # {"x": array, "y": array}
+        self._roi_item = None  # pyqtgraph.LinearRegionItem
 
         # Plot
         self.plot = pg.PlotWidget()
@@ -124,6 +126,7 @@ class MainWindow(QMainWindow):
         self.analysis_panel.fit_requested.connect(self._on_fit_requested)
         self.analysis_panel.clear_fit_requested.connect(self._on_clear_fit_requested)
         self.analysis_panel.clear_requested.connect(self._on_analysis_cleared)
+        self.analysis_panel.roi_toggled.connect(self._on_roi_toggled)
 
         self.analysis_dock = QDockWidget("Analysis", self)
         self.analysis_dock.setObjectName("analysis_dock")
@@ -626,6 +629,65 @@ class MainWindow(QMainWindow):
         self._save_settings_best_effort()
         self.statusBar().showMessage(f"Created derived dataset: {derived_ds.name}")
 
+    def _get_current_roi_range(self) -> tuple[float, float] | None:
+        if self._roi_item is not None:
+            return self._roi_item.getRegion()
+        return None
+
+    def _on_roi_toggled(self, enabled: bool) -> None:
+        if enabled:
+            if self._roi_item is None:
+                # Default bounds for the ROI
+                ds = self.state.current_dataset
+                sel = self.state.selection
+                if ds and sel and sel.x_col:
+                    x_data = ds.df[sel.x_col]
+                    x_min, x_max = x_data.min(), x_data.max()
+                    # Start with a region covering the middle 50%
+                    span = x_max - x_min
+                    bounds = (x_min + span * 0.25, x_max - span * 0.25)
+                else:
+                    bounds = (0, 1)
+
+                self._roi_item = pg.LinearRegionItem(values=bounds)
+                self._roi_item.setZValue(10)
+                self._roi_item.sigRegionChanged.connect(self._update_roi_stats)
+                self.plot.addItem(self._roi_item)
+                self._update_roi_stats()
+        else:
+            if self._roi_item is not None:
+                self.plot.removeItem(self._roi_item)
+                self._roi_item = None
+                self.analysis_panel.set_roi_stats("ROI disabled. Check above to enable.")
+
+    def _update_roi_stats(self) -> None:
+        if self._roi_item is None:
+            return
+
+        ds = self.state.current_dataset
+        sel = self.state.selection
+        if ds is None or sel is None or not sel.x_col or not sel.y_col:
+            self.analysis_panel.set_roi_stats("Select X and Y columns in the Controls panel first.")
+            return
+
+        x = ds.df[sel.x_col].to_numpy()
+        y = ds.df[sel.y_col].to_numpy()
+        x_range = self._roi_item.getRegion()
+
+        stats = compute_roi_stats(x, y, x_range)
+        if stats is None:
+            self.analysis_panel.set_roi_stats("No data points inside ROI.")
+            return
+
+        text = (
+            f"Count: {stats.count:,} points\n"
+            f"Mean Y: {stats.y_mean:.4e}\n"
+            f"Std Dev Y: {stats.y_std:.4e}\n"
+            f"Area (Integral): {stats.area:.4e}\n"
+            f"Min Y: {stats.y_min:.4e}  |  Max Y: {stats.y_max:.4e}"
+        )
+        self.analysis_panel.set_roi_stats(text)
+
     def _on_peak_analysis_requested(self, req: PeakAnalysisRequest) -> None:
         ds = self.state.current_dataset
         if ds is None:
@@ -648,7 +710,9 @@ class MainWindow(QMainWindow):
                 height=req.min_height if req.min_height else None,
                 distance=int(req.min_distance) if req.min_distance else None,
                 prominence=req.min_prominence if req.min_prominence else None,
-                width=req.width if req.width else None
+                width=req.width if req.width else None,
+                x_range=self._get_current_roi_range(),
+                direction=req.direction
             )
         except Exception as e:
             QMessageBox.critical(self, "Peak Analysis failed", str(e))
@@ -662,6 +726,11 @@ class MainWindow(QMainWindow):
             return
 
         # Store peak data for overlay drawing
+        # Create PeakDataset and set the table model
+        from func.analysis.peak_analyzer import build_peak_table_model
+        peak_model = build_peak_table_model(peak_result)
+        self.analysis_panel.set_peak_model(peak_model)
+
         self._peak_data = {
             "x": np.asarray(peak_result.x_positions, dtype=float),
             "y": np.asarray(peak_result.y_values, dtype=float),
@@ -692,7 +761,12 @@ class MainWindow(QMainWindow):
         # Perform fit
         self.statusBar().showMessage(f"Fitting {req.model_name}...")
         try:
-            res = perform_fit(x, y, req.model_name, p0=p0)
+            res = perform_fit(
+                x, y, 
+                req.model_name, 
+                p0=p0, 
+                x_range=self._get_current_roi_range()
+            )
         except Exception as e:
             QMessageBox.warning(self, "Fit Error", str(e))
             self.statusBar().showMessage("Fit failed.")
