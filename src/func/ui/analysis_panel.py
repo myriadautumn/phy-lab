@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QTableView,
     QTextEdit,
     QVBoxLayout,
@@ -77,7 +78,21 @@ class AnalysisPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
 
-        root = QVBoxLayout(self)
+        # Main layout for the widget itself
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Scroll area
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer_layout.addWidget(self.scroll_area)
+
+        # Container widget for scroll area
+        self.container = QWidget()
+        self.scroll_area.setWidget(self.container)
+
+        root = QVBoxLayout(self.container)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
@@ -165,12 +180,15 @@ class AnalysisPanel(QWidget):
         self.peak_detect_btn = QPushButton("Detect Peaks")
         peak_layout.addRow(self.peak_detect_btn)
 
+        peak_layout.addRow(QLabel("Peaks Found:"))
         self.peak_table = QTableView()
-        # Initial configuration for the table
+        # Configuration for the table
         self.peak_table.verticalHeader().setVisible(False)
+        self.peak_table.horizontalHeader().setStretchLastSection(True)
         self.peak_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self.peak_table.setAlternatingRowColors(True)
-        self.peak_table.setMaximumHeight(200) # Give it a reasonable max height inside the scroll area / dock
+        self.peak_table.setMinimumHeight(150)
+        self.peak_table.setMaximumHeight(300)
         peak_layout.addRow(self.peak_table)
 
         # Add to main layout

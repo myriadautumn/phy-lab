@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QRadioButton,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -35,7 +36,21 @@ class FormatPanel(QWidget):
 
         self._updating = False
 
-        root = QVBoxLayout(self)
+        # Main layout for the widget itself
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Scroll area
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer_layout.addWidget(self.scroll_area)
+
+        # Container widget for scroll area
+        self.container = QWidget()
+        self.scroll_area.setWidget(self.container)
+
+        root = QVBoxLayout(self.container)
         root.setContentsMargins(8, 0, 8, 8)
         root.setSpacing(8)
 
